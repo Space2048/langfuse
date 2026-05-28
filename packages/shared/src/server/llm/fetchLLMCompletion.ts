@@ -1,8 +1,6 @@
-// We need to use Zod3 for structured outputs due to a bug in
-// ChatVertexAI. See issue: https://github.com/langfuse/langfuse/issues/7429
-import { type ZodSchema } from "zod/v3";
+import { type ZodType, z } from "zod";
 
-import { ChatAnthropic } from "@langchain/anthropic";
+import { ChatAnthropic, ChatAnthropicInput } from "@langchain/anthropic";
 import { ChatVertexAI } from "@langchain/google-vertexai";
 import { ChatBedrockConverse } from "@langchain/aws";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
@@ -21,6 +19,7 @@ import { IterableReadableStream } from "@langchain/core/utils/stream";
 import { ChatOpenAI, AzureChatOpenAI } from "@langchain/openai";
 import { env } from "../../env";
 import GCPServiceAccountKeySchema, {
+  BedrockAccessKeysSchema,
   BedrockConfigSchema,
   BedrockCredentialSchema,
   VertexAIConfigSchema,
@@ -42,14 +41,47 @@ import {
   TraceSinkParams,
 } from "./types";
 import type { BaseCallbackHandler } from "@langchain/core/callbacks/base";
-import { HttpsProxyAgent } from "https-proxy-agent";
+import { ProxyAgent } from "undici";
 import { getInternalTracingHandler } from "./getInternalTracingHandler";
 import { decrypt } from "../../encryption";
-import { decryptAndParseExtraHeaders } from "./utils";
+import {
+  decryptAndParseExtraHeaders,
+  executeWithRuntimeTimeout,
+  RUNTIME_TIMEOUT_ADAPTERS,
+} from "./utils";
 import { logger } from "../logger";
 import { LLMCompletionError } from "./errors";
 
+export type CompletionWithReasoning = { text: string; reasoning?: string };
+type AIMessageContent = AIMessage["content"];
+type AIMessageContentBlock = Exclude<AIMessageContent, string>[number];
+type SplitAIMessageContent = {
+  text: string;
+  contentWithoutThinking: AIMessageContent;
+  reasoning?: string;
+};
+
+const NON_RETRYABLE_LLM_ERROR_PATTERNS = [
+  "Request timed out",
+  "is not valid JSON",
+  "Unterminated string in JSON at position",
+  "TypeError",
+  "reached the end of its life",
+] as const;
+
 const isLangfuseCloud = Boolean(env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION);
+
+// Maps adapters to the content block types that represent "thinking".
+// Used to extract reasoning separately and strip thinking parts from parsed output.
+const THINKING_BLOCK_TYPES: Partial<Record<LLMAdapter, Set<string>>> = {
+  [LLMAdapter.Bedrock]: new Set(["reasoning_content"]),
+  [LLMAdapter.VertexAI]: new Set(["reasoning"]),
+  [LLMAdapter.GoogleAIStudio]: new Set(["reasoning"]),
+};
+
+function getThinkingBlockTypes(adapter: LLMAdapter): Set<string> | undefined {
+  return THINKING_BLOCK_TYPES[adapter];
+}
 
 const PROVIDERS_WITH_REQUIRED_USER_MESSAGE = [
   LLMAdapter.VertexAI,
@@ -68,6 +100,59 @@ const transformSystemMessageToUserMessage = (
   return [new HumanMessage(safeContent)];
 };
 
+const googleProviderOptionsSchema = z
+  .object({
+    thinkingBudget: z.number().optional(),
+    thinkingLevel: z.string().optional(), // intentionally loose as types differ / may be extended in the future and are passed through to API
+  })
+  .optional();
+
+// For using Bedrock API key in Bearer token format
+const createBedrockBearerAuth = (token: string) => ({
+  clientOptions: {
+    token: { token },
+    authSchemePreference: ["httpBearerAuth"],
+  },
+});
+
+export function resolveBedrockAuth(params: {
+  secretKey: string;
+  allowDefaultCredentials: boolean;
+}): {
+  credentials?: z.infer<typeof BedrockAccessKeysSchema>;
+  clientOptions?: {
+    token: { token: string };
+    authSchemePreference: string[];
+  };
+} {
+  const { secretKey, allowDefaultCredentials } = params;
+
+  if (
+    secretKey === BEDROCK_USE_DEFAULT_CREDENTIALS &&
+    allowDefaultCredentials
+  ) {
+    return {};
+  }
+
+  try {
+    const parsedCredential = BedrockCredentialSchema.parse(
+      JSON.parse(secretKey),
+    );
+
+    if ("apiKey" in parsedCredential) {
+      return createBedrockBearerAuth(parsedCredential.apiKey);
+    }
+
+    return {
+      credentials: parsedCredential,
+    };
+  } catch {
+    throw new Error(
+      "Invalid Bedrock credentials. Expected AWS access key JSON or a Bedrock API key.",
+    );
+  }
+}
+
 type ProcessTracedEvents = () => Promise<void>;
 
 type LLMCompletionParams = {
@@ -79,7 +164,7 @@ type LLMCompletionParams = {
     baseURL?: string | null;
     config?: Record<string, string> | null;
   };
-  structuredOutputSchema?: ZodSchema | LLMJSONSchema;
+  structuredOutputSchema?: ZodType | LLMJSONSchema;
   callbacks?: BaseCallbackHandler[];
   maxRetries?: number;
   traceSinkParams?: TraceSinkParams;
@@ -101,12 +186,12 @@ export async function fetchLLMCompletion(
   params: LLMCompletionParams & {
     streaming: false;
   },
-): Promise<string>;
+): Promise<string | CompletionWithReasoning>;
 
 export async function fetchLLMCompletion(
   params: LLMCompletionParams & {
     streaming: false;
-    structuredOutputSchema: ZodSchema;
+    structuredOutputSchema: ZodType;
   },
 ): Promise<Record<string, unknown>>;
 
@@ -115,12 +200,13 @@ export async function fetchLLMCompletion(
     streaming: false;
     tools: LLMToolDefinition[];
   },
-): Promise<ToolCallResponse>;
+): Promise<ToolCallResponse & { reasoning?: string }>;
 
 export async function fetchLLMCompletion(
   params: FetchLLMCompletionParams,
 ): Promise<
   | string
+  | CompletionWithReasoning
   | IterableReadableStream<Uint8Array>
   | Record<string, unknown>
   | ToolCallResponse
@@ -224,7 +310,7 @@ export async function fetchLLMCompletion(
 
   // Common proxy configuration for all adapters
   const proxyUrl = env.HTTPS_PROXY;
-  const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+  const proxyDispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
   const timeoutMs = env.LANGFUSE_FETCH_LLM_COMPLETION_TIMEOUT_MS;
 
   let chatModel:
@@ -241,16 +327,19 @@ export async function fetchLLMCompletion(
       modelParams.model?.includes("claude-opus-4-6") ||
       modelParams.model?.includes("claude-haiku-4-5");
 
-    const chatOptions: Record<string, any> = {
+    const chatOptions: ChatAnthropicInput = {
       anthropicApiKey: apiKey,
       anthropicApiUrl: baseURL ?? undefined,
-      modelName: modelParams.model,
+      model: modelParams.model,
       maxTokens: modelParams.max_tokens,
       callbacks: finalCallbacks,
       clientOptions: {
         maxRetries,
+        defaultHeaders: extraHeaders,
         timeout: timeoutMs,
-        ...(proxyAgent && { httpAgent: proxyAgent }),
+        ...(proxyDispatcher && {
+          fetchOptions: { dispatcher: proxyDispatcher },
+        }),
       },
       temperature: modelParams.temperature,
       topP: modelParams.top_p,
@@ -287,8 +376,8 @@ export async function fetchLLMCompletion(
     });
 
     chatModel = new ChatOpenAI({
-      openAIApiKey: apiKey,
-      modelName: modelParams.model,
+      apiKey,
+      model: modelParams.model,
       temperature: modelParams.temperature,
       ...(isOpenAIReasoningModel(modelParams.model as OpenAIModel)
         ? { maxCompletionTokens: modelParams.max_tokens }
@@ -299,8 +388,11 @@ export async function fetchLLMCompletion(
       maxRetries,
       configuration: {
         baseURL: processedBaseURL,
+        timeout: timeoutMs,
         defaultHeaders: extraHeaders,
-        ...(proxyAgent && { httpAgent: proxyAgent }),
+        ...(proxyDispatcher && {
+          fetchOptions: { dispatcher: proxyDispatcher },
+        }),
       },
       modelKwargs: modelParams.providerOptions,
       timeout: timeoutMs,
@@ -318,8 +410,11 @@ export async function fetchLLMCompletion(
       maxRetries,
       timeout: timeoutMs,
       configuration: {
+        timeout: timeoutMs,
         defaultHeaders: extraHeaders,
-        ...(proxyAgent && { httpAgent: proxyAgent }),
+        ...(proxyDispatcher && {
+          fetchOptions: { dispatcher: proxyDispatcher },
+        }),
       },
       modelKwargs: modelParams.providerOptions,
     });
@@ -331,16 +426,16 @@ export async function fetchLLMCompletion(
     // Handle both explicit credentials and default provider chain
     // Only allow default provider chain in self-hosted or internal AI features
     const isSelfHosted = !isLangfuseCloud;
-    const credentials =
-      apiKey === BEDROCK_USE_DEFAULT_CREDENTIALS &&
-      (isSelfHosted || shouldUseLangfuseAPIKey)
-        ? undefined // undefined = use AWS SDK default credential provider chain
-        : BedrockCredentialSchema.parse(JSON.parse(apiKey));
+    const { credentials, clientOptions } = resolveBedrockAuth({
+      secretKey: apiKey,
+      allowDefaultCredentials: isSelfHosted || shouldUseLangfuseAPIKey,
+    });
 
     chatModel = new ChatBedrockConverse({
       model: modelParams.model,
       region,
       credentials,
+      clientOptions,
       temperature: modelParams.temperature,
       maxTokens: modelParams.max_tokens,
       topP: modelParams.top_p,
@@ -353,6 +448,10 @@ export async function fetchLLMCompletion(
     const { location } = config
       ? VertexAIConfigSchema.parse(config)
       : { location: undefined };
+
+    const googleProviderOptions = googleProviderOptionsSchema.parse(
+      modelParams.providerOptions,
+    );
 
     // Handle both explicit credentials and default provider chain (ADC)
     // Only allow default provider chain in self-hosted or internal AI features
@@ -374,7 +473,7 @@ export async function fetchLLMCompletion(
     // Requests time out after 60 seconds for both public and private endpoints by default
     // Reference: https://cloud.google.com/vertex-ai/docs/predictions/get-online-predictions#send-request
     chatModel = new ChatVertexAI({
-      modelName: modelParams.model,
+      model: modelParams.model,
       temperature: modelParams.temperature,
       maxOutputTokens: modelParams.max_tokens,
       topP: modelParams.top_p,
@@ -385,11 +484,13 @@ export async function fetchLLMCompletion(
       ...(modelParams.maxReasoningTokens !== undefined && {
         maxReasoningTokens: modelParams.maxReasoningTokens,
       }),
-      ...(modelParams.providerOptions && {
-        additionalModelRequestFields: modelParams.providerOptions,
-      }),
+      ...((googleProviderOptions as any) ?? {}), // Typecast as thinkingLevel is intentionally looser typed
     });
   } else if (modelParams.adapter === LLMAdapter.GoogleAIStudio) {
+    const googleProviderOptions = googleProviderOptionsSchema.parse(
+      modelParams.providerOptions,
+    );
+
     chatModel = new ChatGoogleGenerativeAI({
       model: modelParams.model,
       baseUrl: baseURL ?? undefined,
@@ -399,9 +500,11 @@ export async function fetchLLMCompletion(
       callbacks: finalCallbacks,
       maxRetries,
       apiKey,
-      ...(modelParams.providerOptions && {
-        additionalModelRequestFields: modelParams.providerOptions,
-      }),
+      ...(googleProviderOptions
+        ? {
+            thinkingConfig: googleProviderOptions as any, // Typecast as thinkingLevel is intentionally looser typed
+          }
+        : {}),
     });
   } else {
     const _exhaustiveCheck: never = modelParams.adapter;
@@ -417,12 +520,44 @@ export async function fetchLLMCompletion(
     metadata: traceSinkParams?.metadata,
   };
 
+  const runtimeTimeoutEnabled = RUNTIME_TIMEOUT_ADAPTERS.has(
+    modelParams.adapter,
+  );
+  const runtimeTimeoutController = runtimeTimeoutEnabled
+    ? new AbortController()
+    : undefined;
+  const runConfigWithTimeout = runtimeTimeoutController
+    ? {
+        ...runConfig,
+        signal: runtimeTimeoutController.signal,
+      }
+    : runConfig;
+
+  const thinkingTypes = getThinkingBlockTypes(modelParams.adapter);
+
   try {
     // Important: await all generations in the try block as otherwise `processTracedEvents` will run too early in finally block
     if (params.structuredOutputSchema) {
-      const structuredOutput = await (chatModel as ChatOpenAI) // Typecast necessary due to https://github.com/langchain-ai/langchainjs/issues/6795
-        .withStructuredOutput(params.structuredOutputSchema)
-        .invoke(finalMessages, runConfig);
+      // Thinking-capable adapters may produce reasoning blocks that corrupt JSON schema
+      // parsing. Force function calling so the parser reads from tool_calls instead.
+      const structuredOutputSchema = params.structuredOutputSchema;
+      const structuredOutputConfig =
+        thinkingTypes != null
+          ? { method: "functionCalling" as const }
+          : undefined;
+
+      const structuredOutput = await executeWithRuntimeTimeout({
+        enabled: runtimeTimeoutEnabled,
+        timeoutMs,
+        abortController: runtimeTimeoutController,
+        operation: () =>
+          (chatModel as ChatOpenAI)
+            .withStructuredOutput(
+              structuredOutputSchema,
+              structuredOutputConfig,
+            )
+            .invoke(finalMessages, runConfigWithTimeout),
+      });
 
       return structuredOutput;
     }
@@ -433,9 +568,33 @@ export async function fetchLLMCompletion(
         function: tool,
       }));
 
-      const result = await chatModel
-        .bindTools(langchainTools)
-        .invoke(finalMessages, runConfig);
+      const result = await executeWithRuntimeTimeout({
+        enabled: runtimeTimeoutEnabled,
+        timeoutMs,
+        abortController: runtimeTimeoutController,
+        operation: () =>
+          chatModel
+            .bindTools(langchainTools)
+            .invoke(finalMessages, runConfigWithTimeout),
+      });
+
+      if (thinkingTypes != null && Array.isArray(result.content)) {
+        const { contentWithoutThinking, reasoning } = splitAIMessageContent(
+          result.content,
+          thinkingTypes,
+        );
+        const parsed = ToolCallResponseSchema.safeParse({
+          content: contentWithoutThinking,
+          tool_calls: result.tool_calls,
+        });
+        if (!parsed.success)
+          throw Error("Failed to parse LLM tool call result");
+
+        return {
+          ...parsed.data,
+          ...(reasoning ? { reasoning } : {}),
+        };
+      }
 
       const parsed = ToolCallResponseSchema.safeParse(result);
       if (!parsed.success) throw Error("Failed to parse LLM tool call result");
@@ -444,31 +603,66 @@ export async function fetchLLMCompletion(
     }
 
     if (streaming)
-      return chatModel
-        .pipe(new BytesOutputParser())
-        .stream(finalMessages, runConfig);
+      return await executeWithRuntimeTimeout({
+        enabled: runtimeTimeoutEnabled,
+        timeoutMs,
+        abortController: runtimeTimeoutController,
+        operation: () =>
+          chatModel
+            .pipe(createBytesOutputParser(thinkingTypes))
+            .stream(finalMessages, runConfigWithTimeout),
+      });
 
-    const completion = await chatModel
-      .pipe(new StringOutputParser())
-      .invoke(finalMessages, runConfig);
+    // content with thinking blocks can't be handled by StringOutputParser
+    // Invoke model directly and extract text + reasoning separately.
+    if (thinkingTypes != null) {
+      const aiMessage = await executeWithRuntimeTimeout({
+        enabled: runtimeTimeoutEnabled,
+        timeoutMs,
+        abortController: runtimeTimeoutController,
+        operation: () => chatModel.invoke(finalMessages, runConfigWithTimeout),
+      });
+      const completion = extractCompletionWithReasoning(
+        aiMessage,
+        thinkingTypes,
+      );
+
+      // Bedrock only returns reasoning blocks for selected models. Preserve the
+      // historical plain-string shape when the response contains no reasoning.
+      if (
+        modelParams.adapter === LLMAdapter.Bedrock &&
+        completion.reasoning == null
+      ) {
+        return completion.text;
+      }
+
+      return completion;
+    }
+
+    const completion = await executeWithRuntimeTimeout({
+      enabled: runtimeTimeoutEnabled,
+      timeoutMs,
+      abortController: runtimeTimeoutController,
+      operation: () =>
+        chatModel
+          .pipe(new StringOutputParser())
+          .invoke(finalMessages, runConfigWithTimeout),
+    });
 
     return completion;
   } catch (e) {
     const responseStatusCode =
-      (e as any)?.response?.status ?? (e as any)?.status ?? 500;
+      (e as any)?.response?.status ??
+      (e as any)?.status ??
+      // Bedrock errors have status code in $metadata.httpStatusCode
+      (e as any)?.$metadata?.httpStatusCode ??
+      500;
     const rawMessage = e instanceof Error ? e.message : String(e);
     const message = extractCleanErrorMessage(rawMessage);
 
     // Check for non-retryable error patterns in message
-    const nonRetryablePatterns = [
-      "Request timed out",
-      "is not valid JSON",
-      "Unterminated string in JSON at position",
-      "TypeError",
-    ];
-
-    const hasNonRetryablePattern = nonRetryablePatterns.some((pattern) =>
-      message.includes(pattern),
+    const hasNonRetryablePattern = NON_RETRYABLE_LLM_ERROR_PATTERNS.some(
+      (pattern) => message.includes(pattern),
     );
 
     // Determine retryability:
@@ -505,6 +699,93 @@ export async function fetchLLMCompletion(
   } finally {
     await processTracedEvents();
   }
+}
+
+function extractCompletionWithReasoning(
+  message: AIMessage,
+  thinkingBlockTypes: Set<string>,
+): CompletionWithReasoning {
+  const { text, reasoning } = splitAIMessageContent(
+    message.content,
+    thinkingBlockTypes,
+  );
+
+  return {
+    text,
+    ...(reasoning ? { reasoning } : {}),
+  };
+}
+
+function createBytesOutputParser(
+  thinkingBlockTypes: Set<string> | undefined,
+): BytesOutputParser {
+  return thinkingBlockTypes != null
+    ? new ThinkingBlockFilteringBytesOutputParser(thinkingBlockTypes)
+    : new BytesOutputParser();
+}
+
+class ThinkingBlockFilteringBytesOutputParser extends BytesOutputParser {
+  constructor(private readonly thinkingBlockTypes: Set<string>) {
+    super();
+  }
+
+  protected _baseMessageContentToString(
+    content: Exclude<AIMessageContent, string>,
+  ): string {
+    return splitAIMessageContent(content, this.thinkingBlockTypes).text;
+  }
+}
+
+function splitAIMessageContent(
+  content: AIMessageContent,
+  thinkingBlockTypes: Set<string>,
+): SplitAIMessageContent {
+  if (typeof content === "string") {
+    return { text: content, contentWithoutThinking: content };
+  }
+
+  if (!Array.isArray(content)) {
+    return { text: String(content), contentWithoutThinking: content };
+  }
+
+  const textParts: string[] = [];
+  const reasoningParts: string[] = [];
+  const contentWithoutThinking: AIMessageContentBlock[] = [];
+
+  for (const block of content) {
+    if (typeof block === "string") {
+      textParts.push(block);
+      contentWithoutThinking.push(block as AIMessageContentBlock);
+    } else if (thinkingBlockTypes.has(block.type)) {
+      const reasoning = extractReasoningBlockText(block);
+      if (typeof reasoning === "string") reasoningParts.push(reasoning);
+    } else {
+      const text = extractTextBlockText(block);
+      if (typeof text === "string") textParts.push(text);
+      contentWithoutThinking.push(block);
+    }
+  }
+
+  return {
+    text: textParts.join(""),
+    contentWithoutThinking,
+    ...(reasoningParts.length > 0
+      ? { reasoning: reasoningParts.join("") }
+      : {}),
+  };
+}
+
+function extractTextBlockText(block: AIMessageContentBlock) {
+  return (block as any).text ?? (block as any).reasoning;
+}
+
+function extractReasoningBlockText(block: AIMessageContentBlock) {
+  const reasoningText = (block as any).reasoningText;
+
+  if (typeof reasoningText === "string") return reasoningText;
+  if (typeof reasoningText?.text === "string") return reasoningText.text;
+
+  return extractTextBlockText(block);
 }
 
 /**

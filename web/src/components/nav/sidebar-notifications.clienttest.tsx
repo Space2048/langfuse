@@ -1,0 +1,19 @@
+import { render, screen } from "@testing-library/react";
+import { SidebarNotifications } from "./sidebar-notifications";
+
+vi.mock("../useLocalStorage", () => ({
+  __esModule: true,
+  default: () => [["lw5-1", "lw5-2", "lw5-3"], vi.fn()],
+}));
+
+describe("SidebarNotifications", () => {
+  it("renders the GitHub stars badge with social style query params", () => {
+    render(<SidebarNotifications />);
+
+    const badge = screen.getByAltText("Langfuse GitHub stars");
+    const src = badge.getAttribute("src");
+
+    expect(src).toContain("style=social");
+    expect(src).not.toContain("&amp;");
+  });
+});

@@ -1,4 +1,4 @@
-import { z } from "zod/v4";
+import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import {
   createTRPCRouter,
@@ -14,6 +14,8 @@ import {
   GetDefaultViewInput,
   SetDefaultViewInput,
   ClearDefaultViewInput,
+  DefaultViewAssignmentsSchema,
+  TableViewPresetsNamesCreatorListSchema,
 } from "@langfuse/shared/src/server";
 import {
   LangfuseConflictError,
@@ -133,10 +135,11 @@ export const TableViewPresetsRouter = createTRPCRouter({
   getByTableName: protectedProjectProcedure
     .input(
       z.object({
-        tableName: z.string(),
+        tableName: z.enum(TableViewPresetTableName),
         projectId: z.string(),
       }),
     )
+    .output(TableViewPresetsNamesCreatorListSchema)
     .query(async ({ input, ctx }) => {
       throwIfNoProjectAccess({
         session: ctx.session,
@@ -204,6 +207,22 @@ export const TableViewPresetsRouter = createTRPCRouter({
       });
     }),
 
+  getDefaultAssignments: protectedProjectProcedure
+    .input(GetDefaultViewInput)
+    .output(DefaultViewAssignmentsSchema)
+    .query(async ({ input, ctx }) => {
+      throwIfNoProjectAccess({
+        session: ctx.session,
+        projectId: input.projectId,
+        scope: "TableViewPresets:read",
+      });
+
+      return await DefaultViewService.getDefaultAssignments({
+        ...input,
+        userId: ctx.session.user?.id,
+      });
+    }),
+
   setAsDefault: protectedProjectProcedure
     .input(SetDefaultViewInput)
     .mutation(async ({ input, ctx }) => {
@@ -221,12 +240,14 @@ export const TableViewPresetsRouter = createTRPCRouter({
 
       let viewName = input.viewName;
 
-      // For non-system presets, always validate viewId exists and get viewName
+      // For non-system presets, always validate viewId exists and get viewName.
+      // Frontend-defined `__langfuse_` presets still pass the viewName directly.
       if (!input.viewId.startsWith("__langfuse_")) {
         const view = await TableViewService.getTableViewPresetsById(
           input.viewId,
           input.projectId,
         );
+
         // Use provided viewName or infer from view's tableName
         viewName = viewName ?? view.tableName;
       } else if (!viewName) {

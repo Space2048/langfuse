@@ -1,20 +1,18 @@
-import { api } from "@/src/utils/api";
 import { type FilterState, getGenerationLikeTypes } from "@langfuse/shared";
 import { DashboardCard } from "@/src/features/dashboard/components/cards/DashboardCard";
 import { compactNumberFormatter } from "@/src/utils/numbers";
 import { TabComponent } from "@/src/features/dashboard/components/TabsComponent";
-import { BarList } from "@tremor/react";
 import { TotalMetric } from "@/src/features/dashboard/components/TotalMetric";
 import { ExpandListButton } from "@/src/features/dashboard/components/cards/ChevronButton";
 import { useState } from "react";
-import { totalCostDashboardFormatted } from "@/src/features/dashboard/lib/dashboard-utils";
+import { costFormatter } from "@/src/utils/numbers";
 import { NoDataOrLoading } from "@/src/components/NoDataOrLoading";
-import {
-  type QueryType,
-  mapLegacyUiTableFilterToView,
-} from "@/src/features/query";
+import { type QueryType, type ViewVersion } from "@langfuse/shared/query";
+import { mapLegacyUiTableFilterToView } from "@/src/features/dashboard/lib/dashboardUiTableToViewMapping";
 import { Chart } from "@/src/features/widgets/chart-library/Chart";
-import { barListToDataPoints } from "@/src/features/dashboard/lib/tremorv4-recharts-chart-adapters";
+import { barListToDataPoints } from "@/src/features/dashboard/lib/chart-data-adapters";
+import { traceViewQuery } from "@/src/features/dashboard/lib/dashboard-utils";
+import { useScheduledDashboardExecuteQuery } from "@/src/hooks/useDashboardQueryScheduler";
 
 type BarChartDataPoint = {
   name: string;
@@ -28,7 +26,8 @@ export const UserChart = ({
   fromTimestamp,
   toTimestamp,
   isLoading = false,
-  isDashboardChartsBeta = false,
+  metricsVersion,
+  schedulerId,
 }: {
   className?: string;
   projectId: string;
@@ -36,9 +35,12 @@ export const UserChart = ({
   fromTimestamp: Date;
   toTimestamp: Date;
   isLoading?: boolean;
-  isDashboardChartsBeta?: boolean;
+  metricsVersion?: ViewVersion;
+  schedulerId?: string;
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
+  const maxNumberOfEntries = { collapsed: 5, expanded: 20 } as const;
+
   const userCostQuery: QueryType = {
     view: "observations",
     dimensions: [{ field: "userId" }],
@@ -58,13 +60,18 @@ export const UserChart = ({
     timeDimension: null,
     fromTimestamp: fromTimestamp.toISOString(),
     toTimestamp: toTimestamp.toISOString(),
-    orderBy: null,
+    orderBy: [{ field: "sum_totalCost", direction: "desc" }],
+    chartConfig: {
+      type: "HORIZONTAL_BAR",
+      row_limit: maxNumberOfEntries.expanded,
+    },
   };
 
-  const user = api.dashboard.executeQuery.useQuery(
+  const user = useScheduledDashboardExecuteQuery(
     {
       projectId,
       query: userCostQuery,
+      version: metricsVersion,
     },
     {
       trpc: {
@@ -72,25 +79,42 @@ export const UserChart = ({
           skipBatch: true,
         },
       },
+      queryId: `${schedulerId ?? "home:users"}:cost`,
       enabled: !isLoading,
     },
   );
 
+  const isV2 = metricsVersion === "v2";
+  const countField = isV2 ? "uniq_traceId" : "count_count";
+
+  const traceViewBase = traceViewQuery({ metricsVersion, globalFilterState });
+  const traceMetric = traceViewBase.metrics[0] ?? {
+    aggregation: "count",
+    measure: "count",
+  };
   const traceCountQuery: QueryType = {
-    view: "traces",
+    ...traceViewBase,
     dimensions: [{ field: "userId" }],
-    metrics: [{ measure: "count", aggregation: "count" }],
-    filters: mapLegacyUiTableFilterToView("traces", globalFilterState),
     timeDimension: null,
     fromTimestamp: fromTimestamp.toISOString(),
     toTimestamp: toTimestamp.toISOString(),
-    orderBy: null,
+    orderBy: [
+      {
+        field: `${traceMetric.aggregation}_${traceMetric.measure}`,
+        direction: "desc",
+      },
+    ],
+    chartConfig: {
+      type: "HORIZONTAL_BAR",
+      row_limit: maxNumberOfEntries.expanded,
+    },
   };
 
-  const traces = api.dashboard.executeQuery.useQuery(
+  const traces = useScheduledDashboardExecuteQuery(
     {
       projectId,
       query: traceCountQuery,
+      version: metricsVersion,
     },
     {
       trpc: {
@@ -98,6 +122,7 @@ export const UserChart = ({
           skipBatch: true,
         },
       },
+      queryId: `${schedulerId ?? "home:users"}:traces`,
       enabled: !isLoading,
     },
   );
@@ -108,7 +133,7 @@ export const UserChart = ({
         .map((item) => {
           return {
             name: item.userId as string,
-            value: item.count_count ? Number(item.count_count) : 0,
+            value: item[countField] ? Number(item[countField]) : 0,
           };
         })
     : [];
@@ -130,17 +155,12 @@ export const UserChart = ({
   );
 
   const totalTraces = traces.data?.reduce(
-    (acc, curr) => acc + (Number(curr.count_count) || 0),
+    (acc, curr) => acc + (Number(curr[countField]) || 0),
     0,
   );
 
-  const maxNumberOfEntries = { collapsed: 5, expanded: 20 } as const;
-
   const BAR_ROW_HEIGHT = 36;
   const CHART_AXIS_PADDING = 32;
-
-  const localUsdFormatter = (value: number) =>
-    totalCostDashboardFormatted(value);
 
   const data = [
     {
@@ -148,9 +168,10 @@ export const UserChart = ({
       data: isExpanded
         ? transformedCost.slice(0, maxNumberOfEntries.expanded)
         : transformedCost.slice(0, maxNumberOfEntries.collapsed),
-      totalMetric: totalCostDashboardFormatted(totalCost),
+      totalMetric: costFormatter(totalCost),
       metricDescription: "Total cost",
-      formatter: localUsdFormatter,
+      chartMetricLabel: "USD",
+      chartUnit: "USD",
     },
     {
       tabTitle: "Count of Traces",
@@ -161,8 +182,10 @@ export const UserChart = ({
         ? compactNumberFormatter(totalTraces)
         : compactNumberFormatter(0),
       metricDescription: "Total traces",
+      chartMetricLabel: "Traces",
+      chartUnit: "traces",
     },
-  ];
+  ] as const;
 
   return (
     <DashboardCard
@@ -182,42 +205,35 @@ export const UserChart = ({
                       metric={item.totalMetric}
                       description={item.metricDescription}
                     />
-                    {isDashboardChartsBeta ? (
-                      <div
-                        className="mt-4 w-full"
-                        style={{
-                          minHeight: 200,
-                          height: Math.max(
-                            200,
-                            item.data.length * BAR_ROW_HEIGHT +
-                              CHART_AXIS_PADDING,
-                          ),
+                    <div
+                      className="mt-4 w-full"
+                      style={{
+                        minHeight: 200,
+                        height: Math.max(
+                          200,
+                          item.data.length * BAR_ROW_HEIGHT +
+                            CHART_AXIS_PADDING,
+                        ),
+                      }}
+                    >
+                      <Chart
+                        chartType="HORIZONTAL_BAR"
+                        data={barListToDataPoints(item.data)}
+                        config={{
+                          metric: {
+                            label: item.chartMetricLabel,
+                          },
                         }}
-                      >
-                        <Chart
-                          chartType="HORIZONTAL_BAR"
-                          data={barListToDataPoints(item.data)}
-                          rowLimit={maxNumberOfEntries.expanded}
-                          chartConfig={{
-                            type: "HORIZONTAL_BAR",
-                            row_limit: maxNumberOfEntries.expanded,
-                            show_value_labels: true,
-                            subtle_fill: true,
-                          }}
-                          valueFormatter={item.formatter}
-                        />
-                      </div>
-                    ) : (
-                      <div>
-                        <BarList
-                          data={item.data}
-                          valueFormatter={item.formatter}
-                          className="mt-2 [&_*]:text-muted-foreground [&_p]:text-muted-foreground [&_span]:text-muted-foreground"
-                          showAnimation={true}
-                          color={"indigo"}
-                        />
-                      </div>
-                    )}
+                        rowLimit={maxNumberOfEntries.expanded}
+                        chartConfig={{
+                          type: "HORIZONTAL_BAR",
+                          row_limit: maxNumberOfEntries.expanded,
+                          unit: item.chartUnit,
+                          show_value_labels: true,
+                          subtle_fill: true,
+                        }}
+                      />
+                    </div>
                   </div>
                 ) : (
                   <NoDataOrLoading

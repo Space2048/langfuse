@@ -35,8 +35,11 @@ import {
 import {
   AnalyticsIntegrationExportSource,
   EXPORT_SOURCE_OPTIONS,
+  isLegacyBlobExportAllowed,
 } from "@langfuse/shared";
 import { useV4Beta } from "@/src/features/events/hooks/useV4Beta";
+import { useLangfuseCloudRegion } from "@/src/features/organizations/hooks";
+import { useQueryProject } from "@/src/features/projects/hooks";
 import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { api } from "@/src/utils/api";
 import { type RouterOutput } from "@/src/utils/types";
@@ -46,7 +49,7 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
-import { type z } from "zod/v4";
+import { type z } from "zod";
 import { Info, ExternalLink } from "lucide-react";
 
 export default function MixpanelIntegrationSettings() {
@@ -65,7 +68,7 @@ export default function MixpanelIntegrationSettings() {
   );
 
   const status =
-    state.isInitialLoading || !hasAccess
+    state.isLoading || !hasAccess
       ? undefined
       : state.data?.enabled
         ? "active"
@@ -88,7 +91,7 @@ export default function MixpanelIntegrationSettings() {
         ),
       }}
     >
-      <p className="mb-4 text-sm text-primary">
+      <p className="text-primary mb-4 text-sm">
         Integrate with{" "}
         <Link href="https://mixpanel.com" className="underline">
           Mixpanel
@@ -109,7 +112,7 @@ export default function MixpanelIntegrationSettings() {
         <>
           <Header title="Configuration" />
           <Card className="p-3">
-            <MixpanelLogo className="mb-4 w-20 text-foreground" />
+            <MixpanelLogo className="text-foreground mb-4 w-20" />
             <MixpanelIntegrationSettingsForm
               state={state.data}
               projectId={projectId}
@@ -121,7 +124,7 @@ export default function MixpanelIntegrationSettings() {
       {state.data?.enabled && (
         <>
           <Header title="Status" className="mt-8" />
-          <p className="text-sm text-primary">
+          <p className="text-primary text-sm">
             Data synced until:{" "}
             {state.data?.lastSyncAt
               ? new Date(state.data.lastSyncAt).toLocaleString()
@@ -144,6 +147,17 @@ const MixpanelIntegrationSettingsForm = ({
 }) => {
   const capture = usePostHogClientCapture();
   const { isBetaEnabled } = useV4Beta();
+  const { isLangfuseCloud } = useLangfuseCloudRegion();
+  const { project } = useQueryProject();
+
+  // Post-cutoff Cloud projects may only use OBSERVATIONS_V2 (EVENTS). The
+  // Export Source field is hidden in that case; the form value is pinned to
+  // EVENTS via the default below. Mirrors blob-storage settings (LFE-9688 / 9830).
+  const isPostCutoffCloud =
+    project?.createdAt != null &&
+    !isLegacyBlobExportAllowed(new Date(project.createdAt), isLangfuseCloud);
+  const showExportSourceField = isBetaEnabled && !isPostCutoffCloud;
+
   const mixpanelForm = useForm({
     resolver: zodResolver(mixpanelIntegrationFormSchema),
     defaultValues: {
@@ -152,11 +166,12 @@ const MixpanelIntegrationSettingsForm = ({
         MIXPANEL_REGIONS[0].subdomain,
       mixpanelProjectToken: state?.mixpanelProjectToken ?? "",
       enabled: state?.enabled ?? false,
-      exportSource:
-        state?.exportSource ??
-        (isBetaEnabled
-          ? AnalyticsIntegrationExportSource.EVENTS
-          : AnalyticsIntegrationExportSource.TRACES_OBSERVATIONS),
+      exportSource: isPostCutoffCloud
+        ? AnalyticsIntegrationExportSource.EVENTS
+        : (state?.exportSource ??
+          (isBetaEnabled
+            ? AnalyticsIntegrationExportSource.EVENTS
+            : AnalyticsIntegrationExportSource.TRACES_OBSERVATIONS)),
     },
     disabled: isLoading,
   });
@@ -168,11 +183,12 @@ const MixpanelIntegrationSettingsForm = ({
         MIXPANEL_REGIONS[0].subdomain,
       mixpanelProjectToken: state?.mixpanelProjectToken ?? "",
       enabled: state?.enabled ?? false,
-      exportSource:
-        state?.exportSource ??
-        (isBetaEnabled
-          ? AnalyticsIntegrationExportSource.EVENTS
-          : AnalyticsIntegrationExportSource.TRACES_OBSERVATIONS),
+      exportSource: isPostCutoffCloud
+        ? AnalyticsIntegrationExportSource.EVENTS
+        : (state?.exportSource ??
+          (isBetaEnabled
+            ? AnalyticsIntegrationExportSource.EVENTS
+            : AnalyticsIntegrationExportSource.TRACES_OBSERVATIONS)),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
@@ -249,7 +265,7 @@ const MixpanelIntegrationSettingsForm = ({
             </FormItem>
           )}
         />
-        {isBetaEnabled && (
+        {showExportSourceField && (
           <FormField
             control={mixpanelForm.control}
             name="exportSource"
@@ -259,7 +275,7 @@ const MixpanelIntegrationSettingsForm = ({
                   Export Source
                   <Tooltip>
                     <TooltipTrigger>
-                      <Info className="h-3.5 w-3.5 text-muted-foreground" />
+                      <Info className="text-muted-foreground h-3.5 w-3.5" />
                     </TooltipTrigger>
                     <TooltipContent
                       side="bottom"
@@ -268,7 +284,7 @@ const MixpanelIntegrationSettingsForm = ({
                       {EXPORT_SOURCE_OPTIONS.map((option) => (
                         <div key={option.value} className="space-y-0.5">
                           <div className="font-medium">{option.label}</div>
-                          <div className="text-xs text-muted-foreground">
+                          <div className="text-muted-foreground text-xs">
                             {option.description}
                           </div>
                         </div>
@@ -278,7 +294,7 @@ const MixpanelIntegrationSettingsForm = ({
                           href="https://langfuse.com/docs/integrations/export-sources"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-primary hover:underline"
+                          className="text-muted-foreground hover:text-primary inline-flex items-center gap-1 text-xs hover:underline"
                         >
                           For further information see
                           <ExternalLink className="h-3 w-3" />
@@ -323,7 +339,7 @@ const MixpanelIntegrationSettingsForm = ({
                   onCheckedChange={() => {
                     field.onChange(!field.value);
                   }}
-                  className="ml-4 mt-1"
+                  className="mt-1 ml-4"
                 />
               </FormControl>
               <FormMessage />

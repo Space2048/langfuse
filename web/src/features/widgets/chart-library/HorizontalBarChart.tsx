@@ -1,13 +1,27 @@
-import React from "react";
+import React, { useCallback, useMemo } from "react";
 import {
   ChartContainer,
   ChartTooltip,
   ChartTooltipContent,
 } from "@/src/components/ui/chart";
-import { Bar, BarChart, LabelList, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  LabelList,
+  type RenderableText,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { type ChartProps } from "@/src/features/widgets/chart-library/chart-props";
-import { formatAxisLabel } from "@/src/features/widgets/chart-library/utils";
-import { compactNumberFormatter } from "@/src/utils/numbers";
+import {
+  formatAxisLabel,
+  formatMetric,
+  toFullMetricString,
+} from "@/src/features/widgets/chart-library/utils";
+
+const CHAR_WIDTH_PX = 7;
+const LABEL_PADDING_PX = 16;
+
 /**
  * HorizontalBarChart component
  * @param data - Data to be displayed. Expects an array of objects with dimension and metric properties.
@@ -26,18 +40,42 @@ export const HorizontalBarChart: React.FC<ChartProps> = ({
   },
   accessibilityLayer = true,
   showValueLabels = false,
-  valueFormatter = compactNumberFormatter,
+  metricFormatter = (value, options) => formatMetric(value, options),
   subtleFill = false,
 }) => {
+  const formatValue = useCallback(
+    (value: number) =>
+      toFullMetricString(metricFormatter(value, { style: "compact" })),
+    [metricFormatter],
+  );
+
+  const rightMargin = useMemo(() => {
+    if (!showValueLabels || !data?.length) return 8;
+    const maxLabelLength = Math.max(
+      ...data.map((d) => {
+        const value =
+          typeof d.metric === "number" ? d.metric : Number(d.metric ?? 0);
+        return formatValue(value).length;
+      }),
+    );
+    return Math.min(
+      120,
+      Math.max(20, maxLabelLength * CHAR_WIDTH_PX + LABEL_PADDING_PX),
+    );
+  }, [showValueLabels, data, formatValue]);
+
   return (
-    <ChartContainer config={config} className="min-h-0 w-full">
+    <ChartContainer
+      config={config}
+      className="min-h-0 w-full [&_.recharts-bar-rectangle:hover]:opacity-30 dark:[&_.recharts-bar-rectangle:hover]:opacity-100 dark:[&_.recharts-bar-rectangle:hover]:brightness-[3]"
+    >
       <BarChart
         accessibilityLayer={accessibilityLayer}
         data={data}
         layout="vertical"
         margin={{
           top: 4,
-          right: showValueLabels ? 68 : 8,
+          right: rightMargin,
           bottom: 4,
           left: 0,
         }}
@@ -50,6 +88,8 @@ export const HorizontalBarChart: React.FC<ChartProps> = ({
           fontSize={12}
           tickLine={false}
           axisLine={false}
+          niceTicks="auto"
+          tickFormatter={(value) => formatValue(Number(value))}
         />
         <YAxis
           type="category"
@@ -85,27 +125,30 @@ export const HorizontalBarChart: React.FC<ChartProps> = ({
           dataKey="metric"
           radius={[0, 4, 4, 0]}
           maxBarSize={28}
-          className="fill-[--color-metric]"
+          className="fill-(--color-metric)"
           fillOpacity={subtleFill ? 0.3 : 1}
         >
           {showValueLabels ? (
             <LabelList
               dataKey="metric"
               position="right"
-              formatter={(value: number) => valueFormatter(value)}
+              formatter={(value: RenderableText) =>
+                formatValue(Number(value ?? 0))
+              }
               className="fill-muted-foreground"
               style={{ fontSize: 12 }}
             />
           ) : null}
         </Bar>
         <ChartTooltip
+          cursor={false}
           contentStyle={{ backgroundColor: "hsl(var(--background))" }}
           content={({ active, payload, label }) => (
             <ChartTooltipContent
               active={active}
               payload={payload}
               label={label}
-              valueFormatter={(v) => valueFormatter(Number(v))}
+              valueFormatter={(v) => formatValue(Number(v))}
             />
           )}
         />

@@ -93,14 +93,14 @@ const ColoredPromptView = ({
   return (
     <div className={cn("flex flex-col", className)}>
       <div className="relative flex flex-col gap-2">
-        <pre className="flex-1 whitespace-pre-wrap break-words p-3 font-mono text-xs">
+        <pre className="flex-1 p-3 font-mono text-xs wrap-break-word whitespace-pre-wrap">
           {fragments.map((fragment, idx) => (
             <Fragment key={idx}>
               {fragment.type === "text" ? (
                 fragment.content
               ) : (
                 <ColoredVariable
-                  value={fragment.value || ""}
+                  value={fragment.value ?? ""}
                   index={fragment.colorIndex || 0}
                 />
               )}
@@ -173,7 +173,7 @@ export const EvaluationPromptPreview = ({
       // Add variable
       const variableName = match[1];
       const variableValue =
-        extractedVariables.find((v) => v.variable === variableName)?.value ||
+        extractedVariables.find((v) => v.variable === variableName)?.value ??
         "";
 
       fragments.push({

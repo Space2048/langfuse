@@ -1,53 +1,51 @@
-import type { ColumnDefinition } from "@langfuse/shared";
+import type React from "react";
+import type { ColumnDefinition, FilterState } from "@langfuse/shared";
 
-interface CategoricalFacet {
-  type: "categorical";
+interface BaseFacet {
   column: string;
   label: string;
+  tooltip?: string;
+  isDisabled?: boolean;
+  disabledReason?: string;
 }
 
-interface BooleanFacet {
+interface CategoricalFacet extends BaseFacet {
+  type: "categorical";
+  /** Optional function to render an icon next to filter option labels */
+  renderIcon?: (value: string) => React.ReactNode;
+}
+
+interface BooleanFacet extends BaseFacet {
   type: "boolean";
-  column: string;
-  label: string;
   trueLabel?: string;
   falseLabel?: string;
+  invertValue?: boolean; // When true, "True" maps to filter value=false.
 }
 
-interface NumericFacet {
+interface NumericFacet extends BaseFacet {
   type: "numeric";
-  column: string;
-  label: string;
   min: number;
   max: number;
   step?: number;
   unit?: string;
 }
 
-interface StringFacet {
+interface StringFacet extends BaseFacet {
   type: "string";
-  column: string;
-  label: string;
 }
 
-interface KeyValueFacet {
+interface KeyValueFacet extends BaseFacet {
   type: "keyValue";
-  column: string;
-  label: string;
   keyOptions?: string[];
 }
 
-interface NumericKeyValueFacet {
+interface NumericKeyValueFacet extends BaseFacet {
   type: "numericKeyValue";
-  column: string;
-  label: string;
   keyOptions?: string[];
 }
 
-interface StringKeyValueFacet {
+interface StringKeyValueFacet extends BaseFacet {
   type: "stringKeyValue";
-  column: string;
-  label: string;
   keyOptions?: string[];
 }
 
@@ -60,10 +58,35 @@ export type Facet =
   | NumericKeyValueFacet
   | StringKeyValueFacet;
 
+export type FilterStateMigration = (filters: FilterState) => FilterState;
+
 export interface FilterConfig {
   tableName: string;
   columnDefinitions: ColumnDefinition[];
   defaultExpanded?: string[];
   defaultSidebarCollapsed?: boolean;
   facets: Facet[];
+  /** Runs after display-name normalization and before filter validation. */
+  migrateFilterState?: FilterStateMigration;
+}
+
+export function omitFilterFacets(
+  config: FilterConfig,
+  omittedColumns: string[],
+): FilterConfig {
+  if (omittedColumns.length === 0) {
+    return config;
+  }
+
+  const omittedColumnSet = new Set(omittedColumns);
+
+  return {
+    ...config,
+    defaultExpanded: config.defaultExpanded?.filter(
+      (column) => !omittedColumnSet.has(column),
+    ),
+    facets: config.facets.filter(
+      (facet) => !omittedColumnSet.has(facet.column),
+    ),
+  };
 }

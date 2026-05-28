@@ -9,6 +9,8 @@ import {
   EvalTargetObject,
   JobExecutionStatus,
   type FilterState,
+  type JobConfigExecutionMode,
+  isJobConfigExecutableForExecutionMode,
   mapEventEvalFilterColumnIdToField,
 } from "@langfuse/shared";
 import { createW3CTraceId } from "../../utils";
@@ -17,6 +19,7 @@ interface ScheduleObservationEvalsParams {
   observation: ObservationForEval;
   configs: ObservationEvalConfig[];
   schedulerDeps: ObservationEvalSchedulerDeps;
+  executionMode?: JobConfigExecutionMode;
 }
 
 /**
@@ -35,16 +38,24 @@ interface ScheduleObservationEvalsParams {
 export async function scheduleObservationEvals(
   params: ScheduleObservationEvalsParams,
 ): Promise<void> {
-  const { observation, configs, schedulerDeps } = params;
+  const { observation, configs, schedulerDeps, executionMode } = params;
 
   // Early return if no configs
   if (configs.length === 0) {
     return;
   }
 
-  // Filter configs that match this observation (filter + sampling)
-  // This is done before S3 upload to avoid unnecessary uploads
+  // Filter configs that match this observation (filter + sampling).
+  // This is done before S3 upload to avoid unnecessary uploads.
   const matchingConfigs = configs.filter((config) => {
+    if (!isJobConfigExecutableForExecutionMode(config, executionMode)) {
+      logger.debug("Skipping non-executable observation eval config", {
+        configId: config.id,
+      });
+
+      return false;
+    }
+
     // Check filter
     const isTargeted = evaluateFilter(observation, config);
     if (!isTargeted) {
@@ -89,6 +100,7 @@ export async function scheduleObservationEvals(
         matchingConfig,
         observationS3Path,
         schedulerDeps,
+        executionMode,
       }).catch((error) => {
         logger.error("Failed to process observation eval config", {
           configId: matchingConfig.id,
@@ -106,13 +118,19 @@ interface ProcessConfigParams {
   matchingConfig: ObservationEvalConfig;
   observationS3Path: string;
   schedulerDeps: ObservationEvalSchedulerDeps;
+  executionMode?: JobConfigExecutionMode;
 }
 
 async function processMatchingConfig(
   params: ProcessConfigParams,
 ): Promise<void> {
-  const { observation, matchingConfig, observationS3Path, schedulerDeps } =
-    params;
+  const {
+    observation,
+    matchingConfig,
+    observationS3Path,
+    schedulerDeps,
+    executionMode,
+  } = params;
 
   const jobExecutionId = createW3CTraceId(
     `${matchingConfig.id}:${observation.span_id}`,
@@ -135,6 +153,8 @@ async function processMatchingConfig(
     projectId: observation.project_id,
     observationS3Path,
     delay: 0,
+    evalTemplateType: matchingConfig.evalTemplate.type,
+    ...(executionMode ? { executionMode } : {}),
   });
 
   logger.debug("Scheduled observation eval job", {

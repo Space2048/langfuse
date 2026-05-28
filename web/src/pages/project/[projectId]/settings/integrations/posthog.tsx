@@ -32,8 +32,11 @@ import { posthogIntegrationFormSchema } from "@/src/features/posthog-integration
 import {
   AnalyticsIntegrationExportSource,
   EXPORT_SOURCE_OPTIONS,
+  isLegacyBlobExportAllowed,
 } from "@langfuse/shared";
 import { useV4Beta } from "@/src/features/events/hooks/useV4Beta";
+import { useLangfuseCloudRegion } from "@/src/features/organizations/hooks";
+import { useQueryProject } from "@/src/features/projects/hooks";
 import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { api } from "@/src/utils/api";
 import { type RouterOutput } from "@/src/utils/types";
@@ -43,7 +46,7 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
-import { type z } from "zod/v4";
+import { type z } from "zod";
 import { Info, ExternalLink } from "lucide-react";
 
 export default function PosthogIntegrationSettings() {
@@ -62,7 +65,7 @@ export default function PosthogIntegrationSettings() {
   );
 
   const status =
-    state.isInitialLoading || !hasAccess
+    state.isLoading || !hasAccess
       ? undefined
       : state.data?.enabled
         ? "active"
@@ -85,7 +88,7 @@ export default function PosthogIntegrationSettings() {
         ),
       }}
     >
-      <p className="mb-4 text-sm text-primary">
+      <p className="text-primary mb-4 text-sm">
         We have teamed up with{" "}
         <Link href="https://posthog.com" className="underline">
           PostHog
@@ -106,7 +109,7 @@ export default function PosthogIntegrationSettings() {
         <>
           <Header title="Configuration" />
           <Card className="p-3">
-            <PostHogLogo className="mb-4 w-36 text-foreground" />
+            <PostHogLogo className="text-foreground mb-4 w-36" />
             <PostHogIntegrationSettings
               state={state.data}
               projectId={projectId}
@@ -118,7 +121,7 @@ export default function PosthogIntegrationSettings() {
       {state.data?.enabled && (
         <>
           <Header title="Status" className="mt-8" />
-          <p className="text-sm text-primary">
+          <p className="text-primary text-sm">
             Data synced until:{" "}
             {state.data?.lastSyncAt
               ? new Date(state.data.lastSyncAt).toLocaleString()
@@ -141,17 +144,29 @@ const PostHogIntegrationSettings = ({
 }) => {
   const capture = usePostHogClientCapture();
   const { isBetaEnabled } = useV4Beta();
+  const { isLangfuseCloud } = useLangfuseCloudRegion();
+  const { project } = useQueryProject();
+
+  // Post-cutoff Cloud projects may only use OBSERVATIONS_V2 (EVENTS). The
+  // Export Source field is hidden in that case; the form value is pinned to
+  // EVENTS via the default below. Mirrors blob-storage settings (LFE-9688 / 9830).
+  const isPostCutoffCloud =
+    project?.createdAt != null &&
+    !isLegacyBlobExportAllowed(new Date(project.createdAt), isLangfuseCloud);
+  const showExportSourceField = isBetaEnabled && !isPostCutoffCloud;
+
   const posthogForm = useForm({
     resolver: zodResolver(posthogIntegrationFormSchema),
     defaultValues: {
       posthogHostname: state?.posthogHostName ?? "",
       posthogProjectApiKey: state?.posthogApiKey ?? "",
       enabled: state?.enabled ?? false,
-      exportSource:
-        state?.exportSource ??
-        (isBetaEnabled
-          ? AnalyticsIntegrationExportSource.EVENTS
-          : AnalyticsIntegrationExportSource.TRACES_OBSERVATIONS),
+      exportSource: isPostCutoffCloud
+        ? AnalyticsIntegrationExportSource.EVENTS
+        : (state?.exportSource ??
+          (isBetaEnabled
+            ? AnalyticsIntegrationExportSource.EVENTS
+            : AnalyticsIntegrationExportSource.TRACES_OBSERVATIONS)),
     },
     disabled: isLoading,
   });
@@ -161,11 +176,12 @@ const PostHogIntegrationSettings = ({
       posthogHostname: state?.posthogHostName ?? "",
       posthogProjectApiKey: state?.posthogApiKey ?? "",
       enabled: state?.enabled ?? false,
-      exportSource:
-        state?.exportSource ??
-        (isBetaEnabled
-          ? AnalyticsIntegrationExportSource.EVENTS
-          : AnalyticsIntegrationExportSource.TRACES_OBSERVATIONS),
+      exportSource: isPostCutoffCloud
+        ? AnalyticsIntegrationExportSource.EVENTS
+        : (state?.exportSource ??
+          (isBetaEnabled
+            ? AnalyticsIntegrationExportSource.EVENTS
+            : AnalyticsIntegrationExportSource.TRACES_OBSERVATIONS)),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
@@ -225,7 +241,7 @@ const PostHogIntegrationSettings = ({
             </FormItem>
           )}
         />
-        {isBetaEnabled && (
+        {showExportSourceField && (
           <FormField
             control={posthogForm.control}
             name="exportSource"
@@ -235,7 +251,7 @@ const PostHogIntegrationSettings = ({
                   Export Source
                   <Tooltip>
                     <TooltipTrigger>
-                      <Info className="h-3.5 w-3.5 text-muted-foreground" />
+                      <Info className="text-muted-foreground h-3.5 w-3.5" />
                     </TooltipTrigger>
                     <TooltipContent
                       side="bottom"
@@ -244,7 +260,7 @@ const PostHogIntegrationSettings = ({
                       {EXPORT_SOURCE_OPTIONS.map((option) => (
                         <div key={option.value} className="space-y-0.5">
                           <div className="font-medium">{option.label}</div>
-                          <div className="text-xs text-muted-foreground">
+                          <div className="text-muted-foreground text-xs">
                             {option.description}
                           </div>
                         </div>
@@ -254,7 +270,7 @@ const PostHogIntegrationSettings = ({
                           href="https://langfuse.com/docs/integrations/export-sources"
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-primary hover:underline"
+                          className="text-muted-foreground hover:text-primary inline-flex items-center gap-1 text-xs hover:underline"
                         >
                           For further information see
                           <ExternalLink className="h-3 w-3" />
@@ -299,7 +315,7 @@ const PostHogIntegrationSettings = ({
                   onCheckedChange={() => {
                     field.onChange(!field.value);
                   }}
-                  className="ml-4 mt-1"
+                  className="mt-1 ml-4"
                 />
               </FormControl>
               <FormMessage />

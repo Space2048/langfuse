@@ -5,13 +5,13 @@ import { type FilterState, type TimeFilter } from "@langfuse/shared";
 type UseEventsFilterOptionsParams = {
   projectId: string;
   oldFilterState: FilterState;
-  hasParentObservation?: boolean;
+  isRootObservation?: boolean;
 };
 
 export function useEventsFilterOptions({
   projectId,
   oldFilterState,
-  hasParentObservation,
+  isRootObservation,
 }: UseEventsFilterOptionsParams) {
   // Extract start time filters for filter options query
   const startTimeFilters = useMemo(() => {
@@ -28,7 +28,7 @@ export function useEventsFilterOptions({
       projectId,
       startTimeFilter:
         startTimeFilters.length > 0 ? startTimeFilters : undefined,
-      hasParentObservation,
+      isRootObservation,
     },
     {
       trpc: {
@@ -58,6 +58,16 @@ export function useEventsFilterOptions({
       ) ?? undefined;
 
     const scoresNumeric = filterOptions.data?.scores_avg ?? undefined;
+    const traceScoreCategories =
+      filterOptions.data?.trace_score_categories?.reduce(
+        (acc, score) => {
+          acc[score.label] = score.values;
+          return acc;
+        },
+        {} as Record<string, string[]>,
+      ) ?? undefined;
+    const traceScoresNumeric =
+      filterOptions.data?.trace_scores_avg ?? undefined;
 
     return {
       environment: filterOptions.data?.environment ?? undefined,
@@ -75,6 +85,11 @@ export function useEventsFilterOptions({
       experimentDatasetId: filterOptions.data?.experimentDatasetId ?? undefined,
       experimentId: filterOptions.data?.experimentId ?? undefined,
       experimentName: filterOptions.data?.experimentName ?? undefined,
+      isRootObservation: filterOptions.data?.isRootObservation ?? undefined,
+      toolNames: filterOptions.data?.toolNames ?? undefined,
+      calledToolNames: filterOptions.data?.calledToolNames ?? undefined,
+      toolDefinitions: [],
+      toolCalls: [],
       latency: [],
       timeToFirstToken: [],
       tokensPerSecond: [],
@@ -86,6 +101,8 @@ export function useEventsFilterOptions({
       totalCost: [],
       score_categories: scoreCategories,
       scores_avg: scoresNumeric,
+      trace_score_categories: traceScoreCategories,
+      trace_scores_avg: traceScoresNumeric,
     };
   }, [filterOptions.data]);
 

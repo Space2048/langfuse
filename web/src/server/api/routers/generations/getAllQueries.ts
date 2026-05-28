@@ -1,13 +1,9 @@
-import { type z } from "zod/v4";
+import { type z } from "zod";
 import { protectedProjectProcedure } from "@/src/server/api/trpc";
 import { paginationZod } from "@langfuse/shared";
 import { GenerationTableOptions } from "./utils/GenerationTableOptions";
 import { getAllGenerations } from "@/src/server/api/routers/generations/db/getAllGenerationsSqlQuery";
-import {
-  getObservationsCountFromEventsTable,
-  getObservationsTableCount,
-} from "@langfuse/shared/src/server";
-import { env } from "@/src/env.mjs";
+import { getObservationsTableCount } from "@langfuse/shared/src/server";
 import { applyCommentFilters } from "@langfuse/shared/src/server";
 
 const GetAllGenerationsInput = GenerationTableOptions.extend({
@@ -41,7 +37,7 @@ export const getAllQueries = {
       return { generations };
     }),
   countAll: protectedProjectProcedure
-    .input(GetAllGenerationsInput)
+    .input(GenerationTableOptions)
     .query(async ({ input, ctx }) => {
       const { filterState, hasNoMatches } = await applyCommentFilters({
         filterState: input.filter ?? [],
@@ -60,10 +56,7 @@ export const getAllQueries = {
         limit: 1,
         offset: 0,
       };
-      const countQuery =
-        env.LANGFUSE_ENABLE_EVENTS_TABLE_OBSERVATIONS === "true"
-          ? await getObservationsCountFromEventsTable(queryOpts)
-          : await getObservationsTableCount(queryOpts);
+      const countQuery = await getObservationsTableCount(queryOpts);
       return {
         totalCount: countQuery,
       };

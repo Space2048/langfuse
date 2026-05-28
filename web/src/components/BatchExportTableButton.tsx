@@ -8,7 +8,8 @@ import {
   DropdownMenuLabel,
 } from "@/src/components/ui/dropdown-menu";
 import { Button } from "@/src/components/ui/button";
-import { Download, Loader, Info } from "lucide-react";
+import Spinner from "@/src/components/design-system/Spinner/Spinner";
+import { Download, Info } from "lucide-react";
 import {
   type BatchExportTableName,
   exportOptions,
@@ -98,7 +99,7 @@ export const BatchExportTableButton: React.FC<BatchExportTableButtonProps> = (
       <DropdownMenuTrigger asChild>
         <Button variant="outline" size="icon" title="Export">
           {isExporting ? (
-            <Loader className="h-4 w-4 animate-spin" />
+            <Spinner size="sm" />
           ) : (
             <Download className="h-4 w-4" />
           )}
@@ -108,7 +109,7 @@ export const BatchExportTableButton: React.FC<BatchExportTableButtonProps> = (
         <DropdownMenuContent className="w-80">
           <DropdownMenuLabel>Export</DropdownMenuLabel>
           {warningMessage && (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">
+            <div className="text-muted-foreground px-2 py-1.5 text-xs">
               <div className="flex items-start gap-1.5">
                 <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 <span>{warningMessage}</span>

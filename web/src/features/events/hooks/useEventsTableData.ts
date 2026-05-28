@@ -1,12 +1,20 @@
 import { api } from "@/src/utils/api";
 import { useMemo } from "react";
-import { type FilterState, AnnotationQueueObjectType } from "@langfuse/shared";
+import {
+  type FilterState,
+  AnnotationQueueObjectType,
+  type TracingSearchType,
+  type ScoreAggregate,
+} from "@langfuse/shared";
 import { type FullEventsObservations } from "@langfuse/shared/src/server";
 import { showSuccessToast } from "@/src/features/notifications/showSuccessToast";
 import { joinTableCoreAndMetrics } from "@/src/components/table/utils/joinTableCoreAndMetrics";
 import { type EventBatchIOOutput } from "@/src/features/events/server/eventsRouter";
 
-type FullEventsObservation = FullEventsObservations[number];
+type FullEventsObservation = FullEventsObservations[number] & {
+  scores?: ScoreAggregate;
+  traceScores?: ScoreAggregate;
+};
 
 type UseEventsTableDataParams = {
   projectId: string;
@@ -20,7 +28,7 @@ type UseEventsTableDataParams = {
     order: "ASC" | "DESC";
   } | null;
   searchQuery?: string | null;
-  searchType?: ("id" | "content")[];
+  searchType?: TracingSearchType[];
   selectedRows: Record<string, boolean>;
   selectAll: boolean;
   setSelectedRows: (rows: Record<string, boolean>) => void;
@@ -44,8 +52,6 @@ export function useEventsTableData({
       filter: filterState,
       searchQuery: searchQuery ?? null,
       searchType: searchType ?? ["id", "content"],
-      page: 1,
-      limit: 1,
       orderBy: null,
     }),
     [projectId, filterState, searchQuery, searchType],
@@ -66,9 +72,13 @@ export function useEventsTableData({
     ],
   );
 
-  // Fetch observations
+  const silentHttpCodes = [422];
+
   const observations = api.events.all.useQuery(getAllPayload, {
     refetchOnWindowFocus: true,
+    meta: {
+      silentHttpCodes, // Turns off red bubble
+    },
   });
 
   const batchIOPayload = useMemo(() => {
@@ -106,16 +116,43 @@ export function useEventsTableData({
     staleTime: 0,
   });
 
+  // Extract error information for display (only from observations.all, not batchIO)
+  const error = observations.error;
+
+  const errorHttpStatus = observations.error?.data?.httpStatus;
+
+  const isSilencedError =
+    observations.isError &&
+    errorHttpStatus &&
+    silentHttpCodes.includes(errorHttpStatus);
+
   // Memoize joined data to prevent infinite re-renders
-  // Include ioDataQuery.isSuccess to ensure re-render when I/O loads
-  const joinedData = useMemo(
-    () =>
-      joinTableCoreAndMetrics<FullEventsObservation, EventBatchIOOutput>(
-        observations.data?.observations,
-        ioDataQuery.data,
-      ),
-    [observations.data?.observations, ioDataQuery.data],
-  );
+  // Handle loading, error, and success states
+  const joinedData = useMemo(() => {
+    if (observations.isLoading) {
+      return { status: "loading" as const, rows: undefined };
+    }
+
+    if (observations.isError) {
+      if (isSilencedError) {
+        // Treat silenced errors as successful with no data
+        return { status: "success" as const, rows: [] };
+      }
+      return { status: "error" as const, rows: undefined };
+    }
+
+    // Success case - join the data
+    return joinTableCoreAndMetrics<FullEventsObservation, EventBatchIOOutput>(
+      observations.data?.observations,
+      ioDataQuery.data,
+    );
+  }, [
+    observations.isLoading,
+    observations.isError,
+    observations.data?.observations,
+    ioDataQuery.data,
+    isSilencedError,
+  ]);
 
   // Fetch total count
   const totalCountQuery = api.events.countAll.useQuery(getCountPayload, {
@@ -146,11 +183,14 @@ export function useEventsTableData({
     projectId: string;
     targetId: string;
   }) => {
+    const visibleObservationIds = new Set(
+      (observations.data?.observations ?? [])
+        .map((observation) => observation.id)
+        .filter((id): id is string => Boolean(id)),
+    );
+
     const selectedObservationIds = Object.keys(selectedRows).filter(
-      (observationId) =>
-        (observations.data?.observations ?? [])
-          .map((o) => o.id)
-          .includes(observationId),
+      (observationId) => visibleObservationIds.has(observationId),
     );
 
     await addToQueueMutation.mutateAsync({
@@ -175,5 +215,8 @@ export function useEventsTableData({
     addToQueueMutation,
     handleAddToAnnotationQueue,
     ioLoading: ioDataQuery.isLoading,
+    error,
+    errorHttpStatus,
+    isSilencedError,
   };
 }

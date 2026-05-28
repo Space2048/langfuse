@@ -18,14 +18,16 @@ import {
   SquarePercent,
   ClipboardPen,
   Clock,
+  Beaker,
 } from "lucide-react";
 import { type ReactNode } from "react";
 import { type Entitlement } from "@/src/features/entitlements/constants/entitlements";
 import { type User } from "next-auth";
 import { type OrganizationScope } from "@/src/features/rbac/constants/organizationAccessRights";
 import { SupportButton } from "@/src/components/nav/support-button";
+import { InAppAiAgentButton } from "@/src/components/nav/in-app-ai-agent-button";
 import { BookACallButton } from "@/src/components/nav/book-a-call-button";
-import { V4BetaSidebarToggle } from "@/src/features/events/components/V4BetaSidebarToggle";
+import { V4SidebarToggle } from "@/src/features/events/components/V4SidebarToggle";
 import { SidebarMenuButton } from "@/src/components/ui/sidebar";
 import { useCommandMenu } from "@/src/features/command-k-menu/CommandMenuProvider";
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
@@ -146,7 +148,7 @@ export const ROUTES: Route[] = [
     icon: SquarePercent,
   },
   {
-    title: "LLM-as-a-Judge",
+    title: "Evaluators",
     icon: Lightbulb,
     productModule: "evaluation",
     projectRbacScopes: ["evalJob:read"],
@@ -169,6 +171,15 @@ export const ROUTES: Route[] = [
     productModule: "datasets",
     group: RouteGroup.Evaluation,
     section: RouteSection.Main,
+  },
+  {
+    title: "Experiments",
+    pathname: `/project/[projectId]/experiments`,
+    icon: Beaker,
+    featureFlag: "experimentsV4Enabled",
+    group: RouteGroup.Evaluation,
+    section: RouteSection.Main,
+    label: "Beta",
   },
   {
     title: "Upgrade",
@@ -195,11 +206,11 @@ export const ROUTES: Route[] = [
     menuNode: <CloudStatusMenu />,
   },
   {
-    title: "v4 Beta Toggle",
+    title: "Preview (fast)",
     pathname: "",
     section: RouteSection.Secondary,
     featureFlag: "v4BetaToggleVisible",
-    menuNode: <V4BetaSidebarToggle />,
+    menuNode: <V4SidebarToggle />,
   },
   {
     title: "Settings",
@@ -218,6 +229,14 @@ export const ROUTES: Route[] = [
     section: RouteSection.Secondary,
     pathname: "",
     menuNode: <BookACallButton />,
+  },
+  {
+    title: "AI Assistant",
+    section: RouteSection.Secondary,
+    pathname: "",
+    featureFlag: "inAppAgent",
+    show: ({ organization }) => organization?.aiFeaturesEnabled === true,
+    menuNode: <InAppAiAgentButton />,
   },
   {
     title: "Support",
@@ -244,7 +263,7 @@ function CommandMenuTrigger() {
     >
       <Search className="h-4 w-4" />
       Go to...
-      <kbd className="pointer-events-none ml-auto inline-flex h-5 select-none items-center gap-1 rounded-md border px-1.5 font-mono text-[10px]">
+      <kbd className="pointer-events-none ml-auto inline-flex h-5 items-center gap-1 rounded-md border px-1.5 font-mono text-[10px] select-none">
         {navigator.userAgent.includes("Mac") ? (
           <span className="text-[12px]">⌘</span>
         ) : (

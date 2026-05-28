@@ -108,6 +108,9 @@ class WebhookTestServer {
 }
 
 const webhookServer = new WebhookTestServer();
+const GITHUB_REPOSITORY_DISPATCH_TRUNCATION_MARKER =
+  "[TRUNCATED: GitHub repository_dispatch payload exceeded size limit]";
+const GITHUB_REPOSITORY_DISPATCH_MAX_PAYLOAD_BYTES = 64 * 1024;
 
 describe("Webhook Integration Tests", () => {
   let projectId: string;
@@ -213,6 +216,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -284,6 +292,7 @@ describe("Webhook Integration Tests", () => {
       expect(payload.action).toBe("created");
       expect(payload.prompt.name).toBe("test-prompt");
       expect(payload.prompt.version).toBe(1);
+      expect(payload.prompt.createdBy).toBe("test-user");
       expect(payload.timestamp).toBeDefined();
       expect(payload.prompt.createdAt).toBeDefined();
       expect(payload.prompt.updatedAt).toBeDefined();
@@ -348,6 +357,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -415,6 +429,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -488,6 +507,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -520,6 +544,9 @@ describe("Webhook Integration Tests", () => {
         throw new Error("Action not found");
       }
 
+      const secretHeaderValue = "secret-api-key-value";
+      const encryptedSecretHeaderValue = encrypt(secretHeaderValue);
+
       await prisma.action.update({
         where: { id: actionId },
         data: {
@@ -528,6 +555,15 @@ describe("Webhook Integration Tests", () => {
           config: {
             ...(action.config as WebhookActionConfigWithSecrets),
             url: "https://webhook-error.example.com/test",
+            requestHeaders: {
+              "x-secret-api-key": {
+                secret: true,
+                value: encryptedSecretHeaderValue,
+              },
+            },
+            displayHeaders: {
+              "x-secret-api-key": { secret: true, value: "secr...alue" },
+            },
           },
         },
       });
@@ -562,6 +598,11 @@ describe("Webhook Integration Tests", () => {
             prompt: PromptDomainSchema.parse(fullPrompt),
             action: "created",
             type: "prompt-version",
+            user: {
+              id: "user-123",
+              name: "Test User",
+              email: "test@example.com",
+            },
           },
         };
 
@@ -591,6 +632,17 @@ describe("Webhook Integration Tests", () => {
       const config = updatedAction?.config as any;
       expect(config.lastFailingExecutionId).toBeDefined();
       expect(typeof config.lastFailingExecutionId).toBe("string");
+
+      // Encrypted request headers are preserved when lastFailingExecutionId is written.
+      expect(config.requestHeaders["x-secret-api-key"].value).toBe(
+        encryptedSecretHeaderValue,
+      );
+      expect(config.requestHeaders["x-secret-api-key"].value).not.toBe(
+        secretHeaderValue,
+      );
+      expect(decrypt(config.requestHeaders["x-secret-api-key"].value)).toBe(
+        secretHeaderValue,
+      );
     });
 
     it("should execute webhook with secret headers correctly", async () => {
@@ -642,6 +694,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -733,6 +790,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -812,6 +874,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -896,6 +963,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -979,6 +1051,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -1033,6 +1110,11 @@ describe("Webhook Integration Tests", () => {
           prompt: PromptDomainSchema.parse(fullPrompt),
           action: "created",
           type: "prompt-version",
+          user: {
+            id: "user-123",
+            name: "Test User",
+            email: "test@example.com",
+          },
         },
       };
 
@@ -1090,9 +1172,8 @@ describe("Webhook Integration Tests", () => {
       });
 
       // Import the function to test it directly
-      const { getConsecutiveAutomationFailures } = await import(
-        "@langfuse/shared/src/server"
-      );
+      const { getConsecutiveAutomationFailures } =
+        await import("@langfuse/shared/src/server");
 
       // Check that consecutive failures is 0 since there are no executions after the lastFailingExecutionId
       const failures = await getConsecutiveAutomationFailures({
@@ -1242,5 +1323,281 @@ describe("Webhook Integration Tests", () => {
         );
       },
     );
+
+    it("should include user info in webhook payload when provided", async () => {
+      const fullPrompt = await prisma.prompt.findUnique({
+        where: { id: promptId },
+      });
+
+      const testUser = {
+        id: "user-123",
+        name: "Test User",
+        email: "test@example.com",
+      };
+
+      const webhookInput: WebhookInput = {
+        projectId,
+        automationId,
+        executionId,
+        payload: {
+          prompt: PromptDomainSchema.parse(fullPrompt),
+          action: "created",
+          type: "prompt-version",
+          user: testUser,
+        },
+      };
+
+      await prisma.automationExecution.create({
+        data: {
+          id: executionId,
+          projectId,
+          triggerId,
+          automationId,
+          actionId,
+          status: ActionExecutionStatus.PENDING,
+          sourceId: webhookInput.executionId,
+          input: webhookInput,
+        },
+      });
+
+      await executeWebhook(webhookInput, { skipValidation: true });
+
+      const requests = webhookServer.getReceivedRequests();
+      expect(requests).toHaveLength(1);
+
+      const payload = JSON.parse(requests[0].body);
+      expect(payload.user).toEqual({
+        name: testUser.name,
+        email: testUser.email,
+      });
+      expect(payload.user.id).toBeUndefined();
+      // Verify prompt is still the last field
+      const payloadKeys = Object.keys(payload);
+      expect(payloadKeys[payloadKeys.length - 1]).toBe("prompt");
+    });
+
+    it("should omit user field from webhook payload when not provided", async () => {
+      const fullPrompt = await prisma.prompt.findUnique({
+        where: { id: promptId },
+      });
+
+      const webhookInput: WebhookInput = {
+        projectId,
+        automationId,
+        executionId,
+        payload: {
+          prompt: PromptDomainSchema.parse(fullPrompt),
+          action: "created",
+          type: "prompt-version",
+        },
+      };
+
+      await prisma.automationExecution.create({
+        data: {
+          id: executionId,
+          projectId,
+          triggerId,
+          automationId,
+          actionId,
+          status: ActionExecutionStatus.PENDING,
+          sourceId: webhookInput.executionId,
+          input: webhookInput,
+        },
+      });
+
+      await executeWebhook(webhookInput, { skipValidation: true });
+
+      const requests = webhookServer.getReceivedRequests();
+      expect(requests).toHaveLength(1);
+
+      const payload = JSON.parse(requests[0].body);
+      expect(payload.user).toBeUndefined();
+    });
+
+    it("should include user info in GitHub dispatch payload when provided", async () => {
+      const fullPrompt = await prisma.prompt.findUnique({
+        where: { id: promptId },
+      });
+
+      const testUser = {
+        id: "user-456",
+        name: "GitHub User",
+        email: "github@example.com",
+      };
+
+      // Create a GitHub dispatch action
+      const ghActionId = v4();
+      await prisma.action.create({
+        data: {
+          id: ghActionId,
+          projectId,
+          type: "GITHUB_DISPATCH",
+          config: {
+            type: "GITHUB_DISPATCH",
+            url: "https://webhook.example.com/dispatches",
+            eventType: "prompt-update",
+            githubToken: encrypt("ghp_test_token"),
+            displayGitHubToken: "ghp_...n",
+          },
+        },
+      });
+
+      // Create automation linking trigger and GitHub dispatch action
+      const ghAutomationId = v4();
+      await prisma.automation.create({
+        data: {
+          id: ghAutomationId,
+          projectId,
+          triggerId,
+          actionId: ghActionId,
+          name: "GitHub Dispatch Automation",
+        },
+      });
+
+      const ghExecutionId = v4();
+      await prisma.automationExecution.create({
+        data: {
+          id: ghExecutionId,
+          projectId,
+          triggerId,
+          automationId: ghAutomationId,
+          actionId: ghActionId,
+          status: ActionExecutionStatus.PENDING,
+          sourceId: promptId,
+          input: {},
+        },
+      });
+
+      const webhookInput: WebhookInput = {
+        projectId,
+        automationId: ghAutomationId,
+        executionId: ghExecutionId,
+        payload: {
+          prompt: PromptDomainSchema.parse(fullPrompt),
+          action: "created",
+          type: "prompt-version",
+          user: testUser,
+        },
+      };
+
+      await executeWebhook(webhookInput, { skipValidation: true });
+
+      const requests = webhookServer.getReceivedRequests();
+      expect(requests).toHaveLength(1);
+
+      const payload = JSON.parse(requests[0].body);
+      expect(payload.event_type).toBe("prompt-update");
+      expect(payload.client_payload.user).toEqual({
+        name: testUser.name,
+        email: testUser.email,
+      });
+      expect(payload.client_payload.user.id).toBeUndefined();
+      // Verify prompt is still the last field in client_payload
+      const clientPayloadKeys = Object.keys(payload.client_payload);
+      expect(clientPayloadKeys[clientPayloadKeys.length - 1]).toBe("prompt");
+    });
+
+    it("should truncate oversized GitHub dispatch prompt fields", async () => {
+      const fullPrompt = await prisma.prompt.findUnique({
+        where: { id: promptId },
+      });
+      if (!fullPrompt) {
+        throw new Error("Prompt not found");
+      }
+
+      const testUser = {
+        id: "user-456",
+        name: "GitHub User",
+        email: "github@example.com",
+      };
+
+      const ghActionId = v4();
+      await prisma.action.create({
+        data: {
+          id: ghActionId,
+          projectId,
+          type: "GITHUB_DISPATCH",
+          config: {
+            type: "GITHUB_DISPATCH",
+            url: "https://webhook.example.com/dispatches",
+            eventType: "prompt-update",
+            githubToken: encrypt("ghp_test_token"),
+            displayGitHubToken: "ghp_...n",
+          },
+        },
+      });
+
+      const ghAutomationId = v4();
+      await prisma.automation.create({
+        data: {
+          id: ghAutomationId,
+          projectId,
+          triggerId,
+          actionId: ghActionId,
+          name: "GitHub Dispatch Automation",
+        },
+      });
+
+      const ghExecutionId = v4();
+      await prisma.automationExecution.create({
+        data: {
+          id: ghExecutionId,
+          projectId,
+          triggerId,
+          automationId: ghAutomationId,
+          actionId: ghActionId,
+          status: ActionExecutionStatus.PENDING,
+          sourceId: promptId,
+          input: {},
+        },
+      });
+
+      const webhookInput: WebhookInput = {
+        projectId,
+        automationId: ghAutomationId,
+        executionId: ghExecutionId,
+        payload: {
+          prompt: PromptDomainSchema.parse({
+            ...fullPrompt,
+            prompt: {
+              content: "a".repeat(GITHUB_REPOSITORY_DISPATCH_MAX_PAYLOAD_BYTES),
+            },
+            config: {
+              schema: {
+                content: "b".repeat(
+                  GITHUB_REPOSITORY_DISPATCH_MAX_PAYLOAD_BYTES,
+                ),
+              },
+            },
+          }),
+          action: "created",
+          type: "prompt-version",
+          user: testUser,
+        },
+      };
+
+      await executeWebhook(webhookInput, { skipValidation: true });
+
+      const requests = webhookServer.getReceivedRequests();
+      expect(requests).toHaveLength(1);
+      expect(Buffer.byteLength(requests[0].body, "utf8")).toBeLessThan(
+        GITHUB_REPOSITORY_DISPATCH_MAX_PAYLOAD_BYTES,
+      );
+
+      const payload = JSON.parse(requests[0].body);
+      expect(payload.event_type).toBe("prompt-update");
+      expect(Object.keys(payload.client_payload)).toHaveLength(8);
+      expect(payload.client_payload.truncation).toEqual({
+        payloadTruncated: true,
+        truncatedFields: ["prompt.prompt", "prompt.config"],
+      });
+      expect(payload.client_payload.prompt.prompt).toBe(
+        GITHUB_REPOSITORY_DISPATCH_TRUNCATION_MARKER,
+      );
+      expect(payload.client_payload.prompt.config).toEqual({});
+
+      const clientPayloadKeys = Object.keys(payload.client_payload);
+      expect(clientPayloadKeys[clientPayloadKeys.length - 1]).toBe("prompt");
+    });
   });
 });

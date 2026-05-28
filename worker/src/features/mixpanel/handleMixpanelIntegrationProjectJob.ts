@@ -21,17 +21,24 @@ import {
 
 type MixpanelExecutionConfig = {
   projectId: string;
+  projectName: string;
   minTimestamp: Date;
   maxTimestamp: Date;
   decryptedMixpanelProjectToken: string;
   mixpanelRegion: string;
+  // First attempt uses ClickHouse `auto` join algorithm. We only fall back to
+  // `grace_hash` (slower, but spills to disk) on retries so an OOM on the first
+  // attempt recovers without manual intervention while healthy syncs stay fast.
+  useGraceHash: boolean;
 };
 
 const processMixpanelTraces = async (config: MixpanelExecutionConfig) => {
   const traces = getTracesForAnalyticsIntegrations(
     config.projectId,
+    config.projectName,
     config.minTimestamp,
     config.maxTimestamp,
+    { useGraceHash: config.useGraceHash },
   );
 
   logger.info(
@@ -65,8 +72,10 @@ const processMixpanelTraces = async (config: MixpanelExecutionConfig) => {
 const processMixpanelGenerations = async (config: MixpanelExecutionConfig) => {
   const generations = getGenerationsForAnalyticsIntegrations(
     config.projectId,
+    config.projectName,
     config.minTimestamp,
     config.maxTimestamp,
+    { useGraceHash: config.useGraceHash },
   );
 
   logger.info(
@@ -100,8 +109,10 @@ const processMixpanelGenerations = async (config: MixpanelExecutionConfig) => {
 const processMixpanelScores = async (config: MixpanelExecutionConfig) => {
   const scores = getScoresForAnalyticsIntegrations(
     config.projectId,
+    config.projectName,
     config.minTimestamp,
     config.maxTimestamp,
+    { useGraceHash: config.useGraceHash },
   );
 
   logger.info(
@@ -135,6 +146,7 @@ const processMixpanelScores = async (config: MixpanelExecutionConfig) => {
 const processMixpanelEvents = async (config: MixpanelExecutionConfig) => {
   const events = getEventsForAnalyticsIntegrations(
     config.projectId,
+    config.projectName,
     config.minTimestamp,
     config.maxTimestamp,
   );
@@ -188,6 +200,11 @@ export const handleMixpanelIntegrationProjectJob = async (
       projectId,
       enabled: true,
     },
+    include: {
+      project: {
+        select: { name: true },
+      },
+    },
   });
 
   if (!mixpanelIntegration) {
@@ -197,9 +214,17 @@ export const handleMixpanelIntegrationProjectJob = async (
     return;
   }
 
+  if (!mixpanelIntegration.project) {
+    logger.warn(
+      `[MIXPANEL] Project not found for Mixpanel integration ${projectId}`,
+    );
+    return;
+  }
+
   // Fetch relevant data and send it to Mixpanel
   const executionConfig: MixpanelExecutionConfig = {
     projectId,
+    projectName: mixpanelIntegration.project.name,
     // Start from 2000-01-01 if no lastSyncAt. Workaround because 1970-01-01 leads to subtle bugs in ClickHouse
     minTimestamp: mixpanelIntegration.lastSyncAt || new Date("2000-01-01"),
     maxTimestamp: new Date(new Date().getTime() - 30 * 60 * 1000), // 30 minutes ago
@@ -207,6 +232,7 @@ export const handleMixpanelIntegrationProjectJob = async (
       mixpanelIntegration.encryptedMixpanelProjectToken,
     ),
     mixpanelRegion: mixpanelIntegration.mixpanelRegion,
+    useGraceHash: job.attemptsMade > 0,
   };
 
   try {

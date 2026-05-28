@@ -24,6 +24,7 @@ export const OBSERVATION_VARIABLES = [
 export const COLUMN_IDENTIFIERS_THAT_REQUIRE_PROPAGATION = new Set([
   "release",
   "traceName",
+  "traceTags",
   "userId",
   "sessionId",
   "tags",
@@ -39,6 +40,7 @@ export const OUTPUT_MAPPING = [
 
 export const INTERNAL_ENVIRONMENTS = [
   LangfuseInternalTraceEnvironment.LLMJudge,
+  LangfuseInternalTraceEnvironment.CodeEval,
   "langfuse-prompt-experiment",
   "langfuse-evaluation",
   "sdk-experiment",
@@ -63,5 +65,21 @@ export const DEFAULT_OBSERVATION_FILTER = [
     operator: "any of" as const,
     value: ["GENERATION"],
     type: "stringOptions" as const,
+  },
+  {
+    column: "environment",
+    operator: "none of" as const,
+    value: [...INTERNAL_ENVIRONMENTS],
+    type: "stringOptions" as const,
+  },
+];
+
+// Default filter when remapping an evaluator from trace-level to observation-level
+export const DEFAULT_OBSERVATION_FILTER_WHEN_REMAPPING = [
+  {
+    column: "parentObservationId",
+    operator: "is null" as const,
+    value: "",
+    type: "null" as const,
   },
 ];

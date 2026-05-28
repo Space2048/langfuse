@@ -14,7 +14,7 @@ export async function hashSecretKey(key: string) {
   return hashedKey;
 }
 
-async function generateKeySet() {
+export async function generateKeySet() {
   return {
     pk: `pk-lf-${randomUUID()}`,
     sk: `sk-lf-${randomUUID()}`,
@@ -41,6 +41,7 @@ export async function createAndAddApiKeysToDb(p: {
   entityId: string;
   scope: ApiKeyScope;
   note?: string;
+  isInAppAgentKey?: boolean;
   predefinedKeys?: {
     secretKey: string;
     publicKey: string;
@@ -72,6 +73,7 @@ export async function createAndAddApiKeysToDb(p: {
       fastHashedSecretKey: hashFromProvidedKey,
       note: p.note,
       scope: p.scope,
+      isInAppAgentKey: p.isInAppAgentKey ?? false,
     },
   });
 
