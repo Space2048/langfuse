@@ -64,14 +64,12 @@ const viewFilterDefinitions: Record<
 > = {
   traces: [
     defineField("name", sourceSpec("Trace Name", { uiTableId: "traceName" })),
-    defineField(
-      "observationName",
-      sourceSpec("Observation Name", { uiTableId: "observationName" }),
-    ),
-    defineField(
-      "scoreName",
-      sourceSpec("Score Name", { uiTableId: "scoreName" }),
-    ),
+    // observationName intentionally omitted: traces:observations is 1:n and traceView has no
+    // observationName dimension.
+    // scoreName intentionally omitted: traces:scores is 1:n, and traceView has
+    // no scoreName dimension.
+    // The legacy *Name->name fallback would silently rewrite this to traces.name.
+    // Filter on the scores-numeric / scores-categorical views instead.
     defineField("tags", sourceSpec("Tags", { uiTableId: "traceTags" })),
     defineField(
       "userId",
@@ -100,10 +98,8 @@ const viewFilterDefinitions: Record<
       "name",
       sourceSpec("Observation Name", { uiTableId: "observationName" }),
     ),
-    defineField(
-      "scoreName",
-      sourceSpec("Score Name", { uiTableId: "scoreName" }),
-    ),
+    // scoreName intentionally omitted: observations:scores is 1:n, and
+    // observationsView has no scoreName dimension. See LFE-9773.
     defineField(
       "userId",
       sourceSpec("User", { uiTableId: "user" }),
@@ -179,6 +175,53 @@ const viewFilterDefinitions: Record<
         uiTableId: "value",
         aliases: ["value"],
       }),
+    ),
+    defineField(
+      "dataType",
+      sourceSpec("Scores Data Type", { uiTableId: "scoreDataType" }),
+    ),
+    defineField("tags", sourceSpec("Tags", { uiTableId: "traceTags" })),
+    defineField(
+      "environment",
+      sourceSpec("Environment", { uiTableId: "environment" }),
+    ),
+    defineField(
+      "userId",
+      sourceSpec("User", { uiTableId: "user" }),
+      sourceSpec("User", { uiTableId: "userId" }),
+    ),
+    defineField(
+      "sessionId",
+      sourceSpec("Session", { uiTableId: "session" }),
+      sourceSpec("Session", { uiTableId: "sessionId" }),
+    ),
+    defineField("metadata", sourceSpec("Metadata", { uiTableId: "metadata" })),
+    defineField(
+      "traceName",
+      sourceSpec("Trace Name", { uiTableId: "traceName" }),
+    ),
+    defineField(
+      "observationName",
+      sourceSpec("Observation Name", { uiTableId: "observationName" }),
+    ),
+    defineField(
+      "traceRelease",
+      sourceSpec("Release", { uiTableId: "release" }),
+    ),
+    defineField(
+      "traceVersion",
+      sourceSpec("Version", { uiTableId: "version" }),
+    ),
+  ],
+  "scores-boolean": [
+    defineField("name", sourceSpec("Score Name", { uiTableId: "scoreName" })),
+    defineField(
+      "source",
+      sourceSpec("Score Source", { uiTableId: "scoreSource" }),
+    ),
+    defineField(
+      "booleanValue",
+      sourceSpec("Boolean Value", { uiTableId: "booleanValue" }),
     ),
     defineField(
       "dataType",

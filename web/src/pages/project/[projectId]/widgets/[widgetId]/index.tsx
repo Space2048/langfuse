@@ -42,11 +42,11 @@ export default function EditWidget() {
       });
       // Navigate back to dashboard if provided else widgets list
       if (dashboardId) {
-        void router.push(
+        router.push(
           `/project/${projectId}/dashboards/${dashboardId}?addWidgetId=${widgetId}`,
         );
       } else {
-        void router.push(`/project/${projectId}/widgets`);
+        router.push(`/project/${projectId}/widgets`);
       }
     },
     onError: (error) => {
@@ -98,6 +98,9 @@ export default function EditWidget() {
     >
       {!isWidgetLoading && widgetData ? (
         <WidgetForm
+          // Remount when the edited widget changes so its loaded values seed
+          // the form defaults once, rather than syncing via an effect.
+          key={widgetId}
           projectId={projectId}
           widgetId={widgetId}
           onSave={handleUpdateWidget}

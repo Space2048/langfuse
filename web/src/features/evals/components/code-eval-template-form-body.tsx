@@ -1,12 +1,8 @@
-import CodeMirror, {
-  EditorView,
-  ExternalChange,
-  hoverTooltip,
-  keymap,
-} from "@uiw/react-codemirror";
-import { EditorState } from "@codemirror/state";
+import CodeMirror, { EditorView, hoverTooltip } from "@uiw/react-codemirror";
+import { EditorState, Prec } from "@codemirror/state";
+import { syntaxTree } from "@codemirror/language";
 import { linter, type Diagnostic } from "@codemirror/lint";
-import { StreamLanguage, type StringStream } from "@codemirror/language";
+import { javascript } from "@codemirror/lang-javascript";
 import { python } from "@codemirror/lang-python";
 import { EvalTemplateSourceCodeLanguage } from "@langfuse/shared";
 import { useTheme } from "next-themes";
@@ -21,14 +17,21 @@ import {
 import { Loader2 } from "lucide-react";
 
 import { Button } from "@/src/components/ui/button";
+import { KeyboardShortcut } from "@/src/components/ui/keyboard-shortcut";
 import { darkTheme } from "@/src/components/editor/dark-theme";
 import { lightTheme } from "@/src/components/editor/light-theme";
+import { autoScrollOnSelectionDrag } from "@/src/components/editor/autoScrollOnSelectionDrag";
 import {
   getCodeEvalHoverDocs,
+  PROPERTY_ACCESS_ONLY_HOVER_KEYS,
   type CodeEvalHoverDocs,
 } from "@/src/features/evals/utils/code-eval-template-hover-docs";
 import {
-  TYPESCRIPT_CODE_EVAL_CONTRACT,
+  getCodeEvalCompletionExtension,
+  isInsideStringOrComment,
+} from "@/src/features/evals/utils/code-eval-template-completions";
+import {
+  formatPythonCodeEvalSourceWithRuff,
   type CodeEvalSourceCodeLanguage,
   type CodeEvalValidationResult,
 } from "@/src/features/evals/utils/code-eval-template-validation";
@@ -42,91 +45,23 @@ type CodeEvalTemplateFormBodyProps = {
   headerAction?: ReactNode;
 };
 
-type ProtectedRange = {
-  from: number;
-  to: number;
-};
-
-type ContractRanges = {
-  prelude: ProtectedRange | null;
-  signature: ProtectedRange;
-};
-
-const PYTHON_EVALUATE_SIGNATURE_PATTERN =
-  /(?:^|\n)def evaluate\s*\(\s*ctx\s*:\s*EvaluationContext\s*\)\s*->\s*EvaluationResult\s*:/;
-const FORMAT_SHORTCUT_KEY = "Shift-Alt-f";
 const FORMAT_SHORTCUT_ARIA = "Alt+Shift+F";
-const TYPESCRIPT_KEYWORDS = new Set([
-  "async",
-  "await",
-  "const",
-  "let",
-  "return",
-  "export",
-  "function",
-  "type",
-  "interface",
-  "if",
-  "else",
-  "true",
-  "false",
-  "undefined",
-  "null",
-]);
-const TYPESCRIPT_BUILTIN_TYPES = new Set([
-  "any",
-  "boolean",
-  "number",
-  "Promise",
-  "Record",
-  "string",
-  "unknown",
-]);
-
-const typescriptCodeEvalLanguage = StreamLanguage.define({
-  name: "typescript-code-eval",
-  token: (stream: StringStream) => {
-    if (stream.match("//")) {
-      stream.skipToEnd();
-      return "comment";
-    }
-
-    if (stream.match("/*")) {
-      while (!stream.eol()) {
-        if (stream.match("*/")) break;
-        stream.next();
-      }
-      return "comment";
-    }
-
-    if (stream.match(/["'`]/, false)) {
-      const quote = stream.next();
-      let escaped = false;
-      while (!stream.eol()) {
-        const next = stream.next();
-        if (next === quote && !escaped) break;
-        escaped = next === "\\" && !escaped;
-      }
-      return "string";
-    }
-
-    const identifier = stream.match(/[A-Za-z_][A-Za-z0-9_]*/, false);
-    if (identifier && identifier !== true) {
-      const word = identifier[0];
-      stream.match(word);
-      if (TYPESCRIPT_KEYWORDS.has(word)) return "keyword";
-      if (TYPESCRIPT_BUILTIN_TYPES.has(word) || /^[A-Z]/.test(word)) {
-        return "typeName";
-      }
-      return null;
-    }
-
-    if (stream.match(/\b\d+(?:\.\d+)?\b/)) {
-      return "number";
-    }
-
-    stream.next();
-    return null;
+const FUNCTION_CONTRACT_DOCS_URL =
+  "https://langfuse.com/docs/evaluation/evaluation-methods/code-evaluators#function-contract";
+const CODE_MIRROR_BASIC_SETUP = {
+  autocompletion: false,
+  completionKeymap: false,
+  foldGutter: true,
+  highlightActiveLine: false,
+  lineNumbers: true,
+  searchKeymap: true,
+};
+const codeMirrorLayoutTheme = EditorView.theme({
+  "&.cm-focused": { outline: "none" },
+  ".cm-gutters": { borderRight: "1px solid" },
+  ".cm-scroller": {
+    maxHeight: "60dvh",
+    overflow: "auto",
   },
 });
 
@@ -144,6 +79,17 @@ function createCodeEvalHoverExtension(hoverDocs: CodeEvalHoverDocs) {
     const from = pos - (before?.length ?? 0);
     const to = from + word.length;
 
+    const node = syntaxTree(view.state).resolveInner(from, 1);
+    if (isInsideStringOrComment(node)) return null;
+    // `type`, `index`, ... are ToolCall properties but also everyday
+    // identifiers; only document them on actual property accesses.
+    if (
+      PROPERTY_ACCESS_ONLY_HOVER_KEYS.has(word) &&
+      node.name !== "PropertyName"
+    ) {
+      return null;
+    }
+
     return {
       pos: from,
       end: to,
@@ -158,116 +104,19 @@ function createCodeEvalHoverExtension(hoverDocs: CodeEvalHoverDocs) {
   });
 }
 
-function findPythonContractRanges(source: string): ContractRanges | null {
-  const match = source.match(PYTHON_EVALUATE_SIGNATURE_PATTERN);
-  if (!match || match.index === undefined) return null;
-
-  const signatureStart = match.index + (match[0].startsWith("\n") ? 1 : 0);
-  const signatureLineEnd = source.indexOf("\n", signatureStart);
-  const signatureTo =
-    signatureLineEnd === -1 ? source.length : signatureLineEnd + 1;
-
-  return {
-    prelude: signatureStart > 0 ? { from: 0, to: signatureStart } : null,
-    signature: { from: signatureStart, to: signatureTo },
-  };
-}
-
-function findTypeScriptContractRanges(source: string): ContractRanges | null {
-  if (!source.startsWith(TYPESCRIPT_CODE_EVAL_CONTRACT)) return null;
-
-  return {
-    prelude: { from: 0, to: TYPESCRIPT_CODE_EVAL_CONTRACT.length },
-    signature: {
-      from: TYPESCRIPT_CODE_EVAL_CONTRACT.length,
-      to: TYPESCRIPT_CODE_EVAL_CONTRACT.length,
-    },
-  };
-}
-
-function getProtectedContractRanges(source: string): ProtectedRange[] {
-  const ranges =
-    findPythonContractRanges(source) ?? findTypeScriptContractRanges(source);
-  if (!ranges) return [];
-
-  return [
-    ...(ranges.prelude ? [ranges.prelude] : []),
-    ...(ranges.signature.from < ranges.signature.to ? [ranges.signature] : []),
-  ];
-}
-
-function isChangeInProtectedRange(
-  from: number,
-  to: number,
-  range: ProtectedRange,
-) {
-  if (from === to) {
-    return from >= range.from && from < range.to;
-  }
-
-  return from < range.to && to > range.from;
-}
-
-const contractReadOnlyExtension = EditorState.changeFilter.of((tr) => {
-  if (!tr.docChanged) return true;
-  if (tr.annotation(ExternalChange)) return true;
-
-  const protectedRanges = getProtectedContractRanges(
-    tr.startState.doc.toString(),
-  );
-  if (protectedRanges.length === 0) return true;
-
-  let touchesProtectedRange = false;
-  tr.changes.iterChangedRanges((fromA, toA) => {
-    if (
-      protectedRanges.some((range) =>
-        isChangeInProtectedRange(fromA, toA, range),
-      )
-    ) {
-      touchesProtectedRange = true;
-    }
-  }, true);
-
-  return touchesProtectedRange ? false : true;
-});
-
-const contractReadOnlyExtensions = [contractReadOnlyExtension];
-
 async function formatTypeScriptSource(source: string) {
-  const [{ format }, typescriptPlugin, estreePlugin] = await Promise.all([
+  // babel-ts instead of the typescript plugin: the latter embeds the
+  // TypeScript compiler, which the SWC minifier miscompiles (dropped
+  // bindings — LFE-10645, caught by scripts/scan-client-bundle.mjs).
+  const [{ format }, babelPlugin, estreePlugin] = await Promise.all([
     import("prettier/standalone"),
-    import("prettier/plugins/typescript"),
+    import("prettier/plugins/babel"),
     import("prettier/plugins/estree"),
   ]);
 
-  const ranges = findTypeScriptContractRanges(source);
-  if (!ranges?.prelude) {
-    return format(source, {
-      parser: "typescript",
-      plugins: [typescriptPlugin, estreePlugin],
-    });
-  }
-
-  const formattedEditableSource = await format(
-    source.slice(ranges.prelude.to),
-    {
-      parser: "typescript",
-      plugins: [typescriptPlugin, estreePlugin],
-    },
-  );
-
-  return `${source.slice(0, ranges.prelude.to)}\n${formattedEditableSource.trimStart()}`;
-}
-
-function scrollCodeMirrorToBottom(view: EditorView) {
-  if (typeof window === "undefined") return;
-
-  window.requestAnimationFrame(() => {
-    if (!view.dom.isConnected) return;
-
-    view.dispatch({
-      effects: EditorView.scrollIntoView(view.state.doc.length, { y: "end" }),
-    });
+  return format(source, {
+    parser: "babel-ts",
+    plugins: [babelPlugin, estreePlugin],
   });
 }
 
@@ -280,47 +129,57 @@ export function CodeEvalTemplateFormBody({
   headerAction,
 }: CodeEvalTemplateFormBodyProps) {
   const { resolvedTheme } = useTheme();
-  const codeMirrorViewRef = useRef<EditorView | null>(null);
   const [isFormatting, setIsFormatting] = useState(false);
   const codeMirrorTheme = resolvedTheme === "dark" ? darkTheme : lightTheme;
   const languageLabel =
     sourceCodeLanguage === EvalTemplateSourceCodeLanguage.PYTHON
       ? "Python"
       : "TypeScript";
-  const canFormatSource =
-    sourceCodeLanguage === EvalTemplateSourceCodeLanguage.TYPESCRIPT;
-  const shouldShowFormatButton = editable && canFormatSource;
-
-  const handleCreateEditor = useCallback((view: EditorView) => {
-    codeMirrorViewRef.current = view;
-    scrollCodeMirrorToBottom(view);
-  }, []);
-
+  const shouldShowFormatButton = editable;
+  // `onSourceCodeChange` comes from a react-hook-form render prop and changes
+  // identity as the field updates. Keep CodeMirror's handler stable so it does
+  // not reconfigure the editor on every keystroke. The refs are synced in an
+  // effect (not during render) so interrupted concurrent renders never leak.
+  const onSourceCodeChangeRef = useRef(onSourceCodeChange);
+  const sourceCodeRef = useRef(sourceCode);
   useEffect(() => {
-    const view = codeMirrorViewRef.current;
-    if (!view) return;
-
-    scrollCodeMirrorToBottom(view);
-  }, [sourceCode, sourceCodeLanguage]);
+    onSourceCodeChangeRef.current = onSourceCodeChange;
+    sourceCodeRef.current = sourceCode;
+  });
+  const handleSourceCodeChange = useCallback((value: string) => {
+    sourceCodeRef.current = value;
+    onSourceCodeChangeRef.current(value);
+  }, []);
 
   const diagnostics = useMemo(
     () => validationResult?.diagnostics ?? [],
     [validationResult?.diagnostics],
   );
 
+  // Reentrancy lives in a ref so `formatSource` (and with it the keydown
+  // extension and the whole extension array) keeps its identity across the
+  // spinner state toggles; `isFormatting` state only drives the button UI.
+  const isFormattingRef = useRef(false);
   const formatSource = useCallback(async () => {
-    if (!editable || isFormatting || !canFormatSource) return;
+    if (!editable || isFormattingRef.current) return;
 
+    isFormattingRef.current = true;
     setIsFormatting(true);
     try {
-      const formatted = await formatTypeScriptSource(sourceCode);
-      onSourceCodeChange(formatted);
+      const formatted =
+        sourceCodeLanguage === EvalTemplateSourceCodeLanguage.PYTHON
+          ? await formatPythonCodeEvalSourceWithRuff(sourceCodeRef.current)
+          : await formatTypeScriptSource(sourceCodeRef.current);
+      // Prettier and Ruff always emit a trailing newline, which CodeMirror
+      // would render as an empty final line.
+      handleSourceCodeChange(formatted.trimEnd());
     } catch (error) {
       console.error(error);
     } finally {
+      isFormattingRef.current = false;
       setIsFormatting(false);
     }
-  }, [editable, isFormatting, canFormatSource, onSourceCodeChange, sourceCode]);
+  }, [editable, handleSourceCodeChange, sourceCodeLanguage]);
 
   const linterExtension = useMemo(
     () =>
@@ -338,22 +197,34 @@ export function CodeEvalTemplateFormBody({
   );
   const formatShortcutExtension = useMemo(
     () =>
-      keymap.of([
-        {
-          key: FORMAT_SHORTCUT_KEY,
-          run: () => {
-            void formatSource();
-            return true;
+      Prec.highest(
+        EditorView.domEventHandlers({
+          keydown: (event) => {
+            // CodeMirror keymaps intentionally don't bind macOS Option combos
+            // that type special characters, so match the physical F key here.
+            if (
+              event.code === "KeyF" &&
+              event.shiftKey &&
+              event.altKey &&
+              !event.ctrlKey &&
+              !event.metaKey
+            ) {
+              event.preventDefault();
+              formatSource();
+              return true;
+            }
+
+            return false;
           },
-        },
-      ]),
+        }),
+      ),
     [formatSource],
   );
   const languageExtension = useMemo(
     () =>
       sourceCodeLanguage === EvalTemplateSourceCodeLanguage.PYTHON
         ? python()
-        : typescriptCodeEvalLanguage,
+        : javascript({ typescript: true }),
     [sourceCodeLanguage],
   );
   const codeEvalHoverExtension = useMemo(
@@ -361,9 +232,33 @@ export function CodeEvalTemplateFormBody({
       createCodeEvalHoverExtension(getCodeEvalHoverDocs(sourceCodeLanguage)),
     [sourceCodeLanguage],
   );
-  const protectedContractExtensions = useMemo(
-    () => contractReadOnlyExtensions,
-    [],
+  const codeEvalCompletionExtension = useMemo(
+    () => getCodeEvalCompletionExtension(sourceCodeLanguage),
+    [sourceCodeLanguage],
+  );
+  const extensions = useMemo(
+    () => [
+      // The `editable` prop only blocks direct typing; readOnly also blocks
+      // paste and drag-and-drop edits.
+      ...(!editable ? [EditorState.readOnly.of(true)] : []),
+      languageExtension,
+      codeEvalCompletionExtension,
+      codeEvalHoverExtension,
+      linterExtension,
+      ...(editable
+        ? [formatShortcutExtension, autoScrollOnSelectionDrag()]
+        : []),
+      EditorView.lineWrapping,
+      codeMirrorLayoutTheme,
+    ],
+    [
+      codeEvalCompletionExtension,
+      codeEvalHoverExtension,
+      editable,
+      formatShortcutExtension,
+      languageExtension,
+      linterExtension,
+    ],
   );
 
   return (
@@ -380,61 +275,45 @@ export function CodeEvalTemplateFormBody({
             size="sm"
             disabled={isFormatting}
             aria-keyshortcuts={FORMAT_SHORTCUT_ARIA}
-            onClick={() => void formatSource()}
+            onClick={() => formatSource()}
           >
             {isFormatting && (
               <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
             )}
             Format
-            <kbd className="bg-muted text-muted-foreground pointer-events-none ml-2 hidden h-4 items-center gap-1 rounded border px-1.5 font-mono text-[10px] font-medium select-none sm:inline-flex">
-              {typeof navigator !== "undefined" &&
-              navigator.userAgent.includes("Macintosh") ? (
-                <>
-                  <span className="text-xs">⇧</span>
-                  <span className="text-xs">⌥</span>F
-                </>
-              ) : (
-                <>Shift+Alt+F</>
-              )}
-            </kbd>
+            <KeyboardShortcut
+              className="ml-2 h-4"
+              keys={
+                typeof navigator !== "undefined" &&
+                navigator.userAgent.includes("Macintosh")
+                  ? ["⇧", "⌥", "F"]
+                  : ["Shift", "Alt", "F"]
+              }
+            />
           </Button>
         ) : null}
       </div>
       <CodeMirror
         value={sourceCode}
         theme={codeMirrorTheme}
-        basicSetup={{
-          foldGutter: true,
-          highlightActiveLine: false,
-          lineNumbers: true,
-          searchKeymap: true,
-        }}
-        extensions={[
-          ...(!editable ? [EditorState.readOnly.of(true)] : []),
-          languageExtension,
-          ...protectedContractExtensions,
-          codeEvalHoverExtension,
-          linterExtension,
-          ...(shouldShowFormatButton ? [formatShortcutExtension] : []),
-          EditorView.lineWrapping,
-          EditorView.theme({
-            "&.cm-focused": { outline: "none" },
-            ".cm-gutters": { borderRight: "1px solid" },
-            ".cm-scroller": {
-              minHeight: "360px",
-              maxHeight: "60dvh",
-              overflow: "auto",
-            },
-            ".cm-content": {
-              minHeight: "360px",
-            },
-          }),
-        ]}
+        basicSetup={CODE_MIRROR_BASIC_SETUP}
+        extensions={extensions}
         editable={editable}
-        onCreateEditor={handleCreateEditor}
-        onChange={onSourceCodeChange}
+        onChange={handleSourceCodeChange}
         className="overflow-hidden rounded-md border text-xs"
       />
+      <p className="text-muted-foreground text-xs">
+        The evaluate function receives an EvaluationContext and returns an
+        EvaluationResult with one or more scores.{" "}
+        <a
+          href={FUNCTION_CONTRACT_DOCS_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline"
+        >
+          See type definitions.
+        </a>
+      </p>
     </div>
   );
 }

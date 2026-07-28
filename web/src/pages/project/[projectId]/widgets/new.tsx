@@ -28,7 +28,7 @@ export default function NewWidget() {
       });
 
       if (dashboardId) {
-        void router.push(
+        router.push(
           `/project/${projectId}/dashboards/${dashboardId}?addWidgetId=${data.widget.id}`,
         );
       } else {
@@ -89,6 +89,12 @@ export default function NewWidget() {
       }}
     >
       <WidgetForm
+        // No `key` on the beta flag: WidgetForm derives viewVersion (and its
+        // available views/measures/filter columns) reactively from isBetaEnabled
+        // + the selected view, so a live beta toggle re-derives them without a
+        // remount — preserving the in-progress form. The only tradeoff is that
+        // an untouched form's default view no longer auto-switches on toggle;
+        // the initial mount still seeds the beta-aware default view below.
         projectId={projectId}
         onSave={handleSaveWidget}
         initialValues={{

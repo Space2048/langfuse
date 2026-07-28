@@ -48,12 +48,13 @@ import {
   ActionId,
   TableViewPresetTableName,
   type TimeFilter,
+  type ScoreAggregate,
+  DEFAULT_SIDEBAR_IMPLICIT_ENVIRONMENT_CONFIG,
 } from "@langfuse/shared";
 import { useRowHeightLocalStorage } from "@/src/components/table/data-table-row-height-switch";
 import { MemoizedIOTableCell } from "../../ui/IOTableCell";
 import { useTableDateRange } from "@/src/hooks/useTableDateRange";
 import { toAbsoluteTimeRange } from "@/src/utils/date-range-utils";
-import { type ScoreAggregate } from "@langfuse/shared";
 import { joinTableCoreAndMetrics } from "@/src/components/table/utils/joinTableCoreAndMetrics";
 import useColumnOrder from "@/src/features/column-visibility/hooks/useColumnOrder";
 import { BatchExportTableButton } from "@/src/components/BatchExportTableButton";
@@ -87,7 +88,6 @@ import {
   getTraceFilterConfig,
   type TraceOmittableFilterColumn,
 } from "@/src/features/filters/config/traces-config";
-import { DEFAULT_SIDEBAR_IMPLICIT_ENVIRONMENT_CONFIG } from "@/src/features/filters/constants/internal-environments";
 import { TablePeekViewTraceDetail } from "@/src/components/table/peek/peek-trace-detail";
 import { usePeekNavigation } from "@/src/components/table/peek/hooks/usePeekNavigation";
 import { useTableViewManager } from "@/src/components/table/table-view-presets/hooks/useTableViewManager";
@@ -98,6 +98,7 @@ import {
   type RefreshInterval,
   REFRESH_INTERVALS,
 } from "@/src/components/table/data-table-refresh-button";
+import { TableHeaderControls } from "@/src/components/table/table-header-controls";
 import { usePeekTableState } from "@/src/components/table/peek/contexts/PeekTableStateContext";
 import { useScoreColumns } from "@/src/features/scores/hooks/useScoreColumns";
 import { scoreFilters } from "@/src/features/scores/lib/scoreColumns";
@@ -153,6 +154,13 @@ export type TracesTableProps = {
   externalFilterState?: FilterState;
   externalDateRange?: TableDateRange;
   limitRows?: number;
+  /**
+   * When true, render the time-range picker and auto-refresh button in the
+   * page header (next to the title) via the header controls slot, instead of
+   * inside the table toolbar. Only used when the table is the primary content
+   * of a `Page`.
+   */
+  showControlsInPageHeader?: boolean;
 };
 
 export default function TracesTable({
@@ -163,6 +171,7 @@ export default function TracesTable({
   externalFilterState,
   externalDateRange,
   limitRows,
+  showControlsInPageHeader = false,
 }: TracesTableProps) {
   const peekContext = usePeekTableState();
   const tracesFilterConfig = useMemo(
@@ -207,7 +216,7 @@ export default function TracesTable({
   const handleRefresh = useCallback(() => {
     setRefreshTick((t) => t + 1);
     setManualRefreshTrigger((t) => t + 1);
-    void Promise.all([
+    Promise.all([
       utils.traces.all.invalidate(),
       utils.traces.metrics.invalidate(),
       utils.traces.countAll.invalidate(),
@@ -307,6 +316,8 @@ export default function TracesTable({
 
     const scoresNumeric =
       traceFilterOptionsResponse.data?.scores_avg ?? undefined;
+    const scoresBoolean =
+      traceFilterOptionsResponse.data?.score_booleans ?? undefined;
 
     return {
       traceName:
@@ -341,6 +352,7 @@ export default function TracesTable({
       totalCost: [],
       score_categories: scoreCategories,
       scores_avg: scoresNumeric,
+      score_booleans: scoresBoolean,
     };
   }, [environmentFilterOptions.data, traceFilterOptionsResponse.data]);
 
@@ -386,8 +398,13 @@ export default function TracesTable({
     dateRangeFilter,
   );
 
-  // Use external filter state if provided, otherwise use combined filter state
-  const filterState = externalFilterState || combinedFilterState;
+  // Use external filter state if provided, otherwise use combined filter
+  // state. Even with an external filter, still apply the date-range bound so
+  // callers that pass an externalDateRange (e.g. the eval preview's "last 24
+  // hours" window) have it honored for the row query, not just score columns.
+  const filterState = externalFilterState
+    ? externalFilterState.concat(dateRangeFilter)
+    : combinedFilterState;
 
   const [paginationState, setPaginationState] = usePaginationState(0, 50, {
     page: "pageIndex",
@@ -397,6 +414,17 @@ export default function TracesTable({
 
   const { searchQuery, searchType, setSearchQuery, setSearchType } =
     useFullTextSearch();
+  const legacyTracingSearchConfig = api.public.tracingSearchConfig.useQuery(
+    { projectId },
+    {
+      enabled: !hideControls,
+      refetchOnMount: false,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+    },
+  );
+  const legacyTracingIoSearchEnabled =
+    legacyTracingSearchConfig.data?.legacyTracingIoSearchEnabled ?? true;
 
   const tracesAllCountFilter = {
     projectId,
@@ -424,7 +452,6 @@ export default function TracesTable({
     refetchOnMount: false,
     refetchOnWindowFocus: true,
   });
-
   const traceMetrics = api.traces.metrics.useQuery(
     {
       projectId,
@@ -503,7 +530,7 @@ export default function TracesTable({
       });
     },
     onSettled: () => {
-      void utils.traces.all.invalidate();
+      utils.traces.all.invalidate();
     },
   });
 
@@ -572,6 +599,15 @@ export default function TracesTable({
     compactNumberFormatter(Object.keys(selectedRows).length)
   );
 
+  // Select-all deletes persist the raw filterState into the batch action, but
+  // comment filters resolve via Postgres at read time and the server rejects
+  // such dispatches, so disable the action up front with a clear reason.
+  // Column ids mirror the traces.deleteMany guard in
+  // web/src/server/api/routers/traces.ts.
+  const hasCommentFilter = filterState.some(
+    (f) => f.column === "commentCount" || f.column === "commentContent",
+  );
+
   const tableActions: TableAction[] = [
     ...(hasTraceDeletionEntitlement
       ? [
@@ -580,6 +616,9 @@ export default function TracesTable({
             type: BatchActionType.Delete,
             label: "Delete Traces",
             description: `This action permanently deletes ${displayCount} traces and cannot be undone. Trace deletion happens asynchronously and may take up to 24 hours.`,
+            disabled: selectAll && hasCommentFilter,
+            disabledReason:
+              "Batch deletion does not support comment filters. Remove the comment filter to delete.",
             accessCheck: {
               scope: "traces:delete",
               entitlement: "trace-deletion",
@@ -825,6 +864,7 @@ export default function TracesTable({
           <Badge
             variant="secondary"
             className="max-w-fit truncate rounded-sm px-1 font-normal"
+            title={value}
           >
             {value}
           </Badge>
@@ -1282,12 +1322,17 @@ export default function TracesTable({
   );
 
   const peekNavigationProps = usePeekNavigation({
-    queryParams: ["observation", "display", "timestamp"],
+    // traceId is not written by this table but arrives on v4-dialect shared
+    // URLs (LFE-11041); listing it clears it on open/navigate/close so it
+    // cannot pin the peek to the originally shared trace.
+    queryParams: ["observation", "display", "timestamp", "traceId"],
     extractParamsValuesFromRow: (row: TracesTableRow) => ({
       timestamp: row.timestamp?.toISOString() || "",
     }),
     expandConfig: {
       basePath: `/project/${projectId}/traces`,
+      pathParam: "traceId",
+      reader: "trace",
     },
   });
 
@@ -1297,7 +1342,9 @@ export default function TracesTable({
       itemType: "TRACE" as const,
       detailNavigationKey: detailPageListKeys.traces,
       peekEventOptions: {
-        ignoredSelectors: ['[role="checkbox"]', '[aria-label="bookmark"]'],
+        // Stable hook (decoupled from the star's state-aware aria-label) so
+        // clicking a row's bookmark toggles it without dismissing the peek.
+        ignoredSelectors: ['[role="checkbox"]', "[data-bookmark-toggle]"],
       },
       ...peekNavigationProps,
     };
@@ -1391,9 +1438,26 @@ export default function TracesTable({
 
   const selectedTraceCount = selectAll ? totalCount : selectedTraceIds.length;
 
+  const refreshConfig = {
+    onRefresh: handleRefresh,
+    isRefreshing:
+      traces.isFetching ||
+      traceMetrics.isFetching ||
+      totalCountQuery.isFetching,
+    interval: refreshInterval,
+    setInterval: setRefreshInterval,
+  };
+
   return (
     <DataTableControlsProvider tableName={tracesFilterConfig.tableName}>
       <div className="flex h-full w-full flex-col">
+        {showControlsInPageHeader && !hideControls && (
+          <TableHeaderControls
+            timeRange={timeRange}
+            setTimeRange={setTimeRange}
+            refresh={refreshConfig}
+          />
+        )}
         {/* Toolbar spanning full width */}
         {!hideControls && (
           <DataTableToolbar
@@ -1409,7 +1473,7 @@ export default function TracesTable({
               metadataSearchFields: ["ID", "Trace Name", "User ID"],
               updateQuery: setSearchQuery,
               currentQuery: searchQuery ?? undefined,
-              tableAllowsFullTextSearch: true,
+              tableAllowsFullTextSearch: legacyTracingIoSearchEnabled,
               setSearchType,
               searchType,
             }}
@@ -1447,17 +1511,9 @@ export default function TracesTable({
             setColumnOrder={setColumnOrder}
             rowHeight={rowHeight}
             setRowHeight={setRowHeight}
-            timeRange={timeRange}
-            setTimeRange={setTimeRange}
-            refreshConfig={{
-              onRefresh: handleRefresh,
-              isRefreshing:
-                traces.isFetching ||
-                traceMetrics.isFetching ||
-                totalCountQuery.isFetching,
-              interval: refreshInterval,
-              setInterval: setRefreshInterval,
-            }}
+            timeRange={showControlsInPageHeader ? undefined : timeRange}
+            setTimeRange={showControlsInPageHeader ? undefined : setTimeRange}
+            refreshConfig={showControlsInPageHeader ? undefined : refreshConfig}
             multiSelect={{
               selectAll,
               setSelectAll,
@@ -1519,7 +1575,7 @@ export default function TracesTable({
               onColumnOrderChange={setColumnOrder}
               rowHeight={rowHeight}
               peekView={peekConfig}
-              tableName={"traces"}
+              tableName="traces"
             />
           </div>
         </ResizableFilterLayout>

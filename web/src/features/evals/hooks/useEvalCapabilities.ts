@@ -8,7 +8,6 @@ export interface EvalCapabilities {
   isNewCompatible: boolean;
   compatibilityCheckWasPerformed: boolean;
   allowLegacy: boolean;
-  allowPropagationFilters: boolean;
   isLoading: boolean;
   hasLegacyEvals: boolean;
 }
@@ -41,29 +40,38 @@ export function useEvalCapabilities(
 
   // Determine OTEL status from SDK version info
   const isOtel = sdkVersionInfo.data?.isOtel ?? false;
-  // TODO: Implement propagation check
-  const isPropagating = false;
 
   // Get eval counts including legacy eval count
   const evalCounts = api.evals.counts.useQuery({ projectId });
   const hasLegacyEvals = (evalCounts.data?.legacyConfigCount ?? 0) > 0;
 
-  // Only hide legacy options for new cloud users (canToggleV4 = false)
-  // Non-cloud deployments always see legacy options
-  // Use === true to default to false while session is loading, preventing flash of legacy options
-  // New users (canToggleV4 = false) default to observation-level evals regardless of v3/v4
+  // The legacy eval experience depends on whether the deployment still writes
+  // the legacy tables. Use explicit mode checks so we default to hidden while
+  // the session is loading, which prevents a flash of legacy options.
   const { isLangfuseCloud } = useLangfuseCloudRegion();
-  const canToggleV4 = session?.user?.canToggleV4 === true;
+  const v4WriteMode = session?.environment?.v4WriteMode;
+
+  // Whether a *new* config may use the legacy experience:
+  // - events_only: legacy tables are no longer written → no new legacy evals.
+  // - dual: self-hosted deployments always allow legacy; on Cloud, no new
+  //   legacy evals — existing legacy evaluators stay visible in read-only mode,
+  //   but cannot be newly set up.
+  // - legacy: legacy is the only experience.
+  const modeAllowsNewLegacy =
+    v4WriteMode === "events_only"
+      ? false
+      : v4WriteMode === "dual"
+        ? !isLangfuseCloud
+        : v4WriteMode === "legacy"; // legacy → true; undefined (loading) → false
 
   return {
     isNewCompatible: isOtel,
     // True when v4 beta is enabled (SDK check query was run)
     compatibilityCheckWasPerformed: isBetaEnabled,
-    // Allow legacy if: not code eval AND (not cloud OR user has legacy evals OR user can toggle v4)
-    allowLegacy:
-      !isCodeEvalConfig && (!isLangfuseCloud || hasLegacyEvals || canToggleV4),
-    // Allow propagation filters only when using OTEL and spans are propagating
-    allowPropagationFilters: isOtel && isPropagating,
+    // Allow setting up new legacy evals only if: not a code eval AND the
+    // deployment mode offers the legacy experience. Having existing legacy
+    // evals no longer grants this; they remain editable via edit mode.
+    allowLegacy: !isCodeEvalConfig && modeAllowsNewLegacy,
     isLoading:
       evalCounts.isLoading || isSessionLoading || sdkVersionInfo.isLoading,
     hasLegacyEvals,

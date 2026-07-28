@@ -7,9 +7,19 @@ import type { Session } from "next-auth";
 import { v4 } from "uuid";
 import waitForExpect from "wait-for-expect";
 
-async function prepare() {
-  const { project, org } = await createOrgProjectAndApiKey();
-
+function createCaller({
+  projectId,
+  orgId,
+  projectName = "Test project",
+  orgName = "Test organization",
+  admin = true,
+}: {
+  projectId: string;
+  orgId: string;
+  projectName?: string;
+  orgName?: string;
+  admin?: boolean;
+}) {
   const session: Session = {
     expires: "1",
     user: {
@@ -18,20 +28,24 @@ async function prepare() {
       name: "Demo User",
       organizations: [
         {
-          id: org.id,
-          name: org.name,
+          id: orgId,
+          name: orgName,
           role: "OWNER",
           plan: "cloud:hobby",
           cloudConfig: undefined,
           metadata: {},
+          aiFeaturesEnabled: false,
+          aiTelemetryEnabled: false,
           projects: [
             {
-              id: project.id,
+              id: projectId,
               role: "ADMIN",
               retentionDays: 30,
               deletedAt: null,
-              name: project.name,
+              hasTraces: false,
+              name: projectName,
               metadata: {},
+              createdAt: new Date().toISOString(),
             },
           ],
         },
@@ -39,8 +53,12 @@ async function prepare() {
       featureFlags: {
         excludeClickhouseRead: false,
         templateFlag: true,
+        searchBar: false,
+        v4BetaToggleVisible: false,
+        observationEvals: false,
+        experimentsV4Enabled: false,
       },
-      admin: true,
+      admin,
     },
     environment: {
       enableExperimentalFeatures: false,
@@ -51,6 +69,18 @@ async function prepare() {
   const ctx = createInnerTRPCContext({ session, headers: {} });
   const caller = appRouter.createCaller({ ...ctx, prisma });
 
+  return { session, ctx, caller };
+}
+
+async function prepare() {
+  const { project, org } = await createOrgProjectAndApiKey();
+  const { session, ctx, caller } = createCaller({
+    projectId: project.id,
+    orgId: org.id,
+    projectName: project.name,
+    orgName: org.name,
+  });
+
   return { project, org, session, ctx, caller };
 }
 
@@ -58,6 +88,101 @@ describe("prompts trpc", () => {
   afterAll(async () => {
     await disconnectQueues();
   });
+  describe("prompts.all input validation", () => {
+    it.each([
+      {
+        caseName: "filter",
+        filter: [
+          {
+            column: "bogus_xyz",
+            type: "string" as const,
+            operator: "=" as const,
+            value: "test",
+          },
+        ],
+        orderBy: { column: "createdAt", order: "DESC" as const },
+      },
+      {
+        caseName: "order by",
+        filter: [],
+        orderBy: { column: "bogus_xyz", order: "DESC" as const },
+      },
+    ])(
+      "rejects an invalid $caseName column as BAD_REQUEST",
+      async ({ filter, orderBy }) => {
+        const projectId = v4();
+        const { caller } = createCaller({
+          projectId,
+          orgId: v4(),
+          admin: false,
+        });
+
+        await expect(
+          caller.prompts.all({
+            projectId,
+            page: 0,
+            limit: 10,
+            filter,
+            orderBy,
+          }),
+        ).rejects.toMatchObject({
+          code: "BAD_REQUEST",
+        });
+      },
+    );
+  });
+
+  describe("prompts.allVersions", () => {
+    it("returns comment counts for the requested prompt version page only", async () => {
+      const { project, caller } = await prepare();
+      const promptName = `test-prompt-comments-${v4()}`;
+      const promptVersions = Array.from({ length: 350 }, (_, index) => ({
+        id: v4(),
+        projectId: project.id,
+        name: promptName,
+        version: index + 1,
+        type: "text" as const,
+        prompt: { text: `Hello world v${index + 1}` },
+        createdBy: "API",
+      }));
+
+      await prisma.prompt.createMany({
+        data: promptVersions,
+      });
+
+      await prisma.comment.createMany({
+        data: [
+          {
+            projectId: project.id,
+            content: "old version comment",
+            objectId: promptVersions[0].id,
+            objectType: "PROMPT",
+          },
+          {
+            projectId: project.id,
+            content: "latest version comment",
+            objectId: promptVersions[349].id,
+            objectType: "PROMPT",
+          },
+        ],
+      });
+
+      const result = await caller.prompts.allVersions({
+        projectId: project.id,
+        name: promptName,
+        page: 0,
+        limit: 10,
+        includeCommentCounts: true,
+      });
+
+      expect(result.promptVersions).toHaveLength(10);
+      expect(result.promptVersions[0]?.version).toBe(350);
+      expect(result.commentCounts).toEqual(
+        new Map([[promptVersions[349].id, 1]]),
+      );
+    });
+  });
+
   describe("prompts.setLabels", () => {
     it("should set labels on a prompt and remove them from other versions", async () => {
       const { project, caller } = await prepare();
@@ -702,6 +827,62 @@ describe("prompts trpc", () => {
           }),
         );
       });
+    });
+
+    it("should not delete an unlabeled prompt version referenced by version", async () => {
+      const { project, caller } = await prepare();
+      const childName = `test-prompt-delete-unlabeled-dependency-${v4()}`;
+      const parentName = `test-prompt-delete-unlabeled-dependent-${v4()}`;
+
+      const childPrompt = await prisma.prompt.create({
+        data: {
+          id: v4(),
+          projectId: project.id,
+          name: childName,
+          version: 1,
+          type: "text",
+          prompt: "child content",
+          createdBy: "test-user",
+          labels: [],
+        },
+      });
+
+      const parentPrompt = await prisma.prompt.create({
+        data: {
+          id: v4(),
+          projectId: project.id,
+          name: parentName,
+          version: 1,
+          type: "text",
+          prompt: `Depends on @@@langfusePrompt:name=${childName}|version=1@@@`,
+          createdBy: "test-user",
+          labels: ["latest"],
+        },
+      });
+
+      await prisma.promptDependency.create({
+        data: {
+          projectId: project.id,
+          parentId: parentPrompt.id,
+          childName,
+          childVersion: 1,
+        },
+      });
+
+      await expect(
+        caller.prompts.deleteVersion({
+          projectId: project.id,
+          promptVersionId: childPrompt.id,
+        }),
+      ).rejects.toThrow(/depending on the prompt version/);
+
+      const remainingChild = await prisma.prompt.findUnique({
+        where: {
+          id: childPrompt.id,
+          projectId: project.id,
+        },
+      });
+      expect(remainingChild).not.toBeNull();
     });
   });
 
@@ -1586,6 +1767,82 @@ describe("prompts trpc", () => {
           isSingleVersion: true,
         }),
       ).rejects.toThrow(/already exist/i);
+    });
+
+    it("should roll back latest-only duplication when a rewritten label dependency would be missing", async () => {
+      const { project, caller } = await prepare();
+      const folderPrefix = `dup-missing-label-${v4().slice(0, 8)}`;
+      const sourcePath = `${folderPrefix}/source`;
+      const targetPath = `${folderPrefix}/copy`;
+      const parentName = `${sourcePath}/parent`;
+      const childName = `${sourcePath}/child`;
+
+      const parentPrompt = await prisma.prompt.create({
+        data: {
+          id: v4(),
+          projectId: project.id,
+          name: parentName,
+          version: 1,
+          type: "text",
+          prompt: `Depends on @@@langfusePrompt:name=${childName}|label=cause@@@`,
+          createdBy: "test-user",
+          labels: ["latest"],
+        },
+      });
+
+      await prisma.prompt.createMany({
+        data: [
+          {
+            id: v4(),
+            projectId: project.id,
+            name: childName,
+            version: 1,
+            type: "text",
+            prompt: "cause-labeled child",
+            createdBy: "test-user",
+            labels: ["cause"],
+          },
+          {
+            id: v4(),
+            projectId: project.id,
+            name: childName,
+            version: 2,
+            type: "text",
+            prompt: "latest child",
+            createdBy: "test-user",
+            labels: ["latest"],
+          },
+        ],
+      });
+
+      await prisma.promptDependency.create({
+        data: {
+          projectId: project.id,
+          parentId: parentPrompt.id,
+          childName,
+          childLabel: "cause",
+        },
+      });
+
+      await expect(
+        caller.prompts.duplicateFolder({
+          projectId: project.id,
+          sourcePath,
+          targetPath,
+          isSingleVersion: true,
+          rewritePromptReferences: true,
+        }),
+      ).rejects.toThrow(/Copy all versions or disable reference rewriting/);
+
+      const copiedPrompts = await prisma.prompt.findMany({
+        where: {
+          projectId: project.id,
+          name: {
+            startsWith: `${targetPath}/`,
+          },
+        },
+      });
+      expect(copiedPrompts).toHaveLength(0);
     });
   });
 });

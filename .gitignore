@@ -1,5 +1,7 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
+sfdc-backfill
+
 # dependencies
 /node_modules
 /.pnp
@@ -11,6 +13,7 @@ migrate
 /coverage
 **/coverage/
 /certs/
+.playwright-mcp/*
 
 # database
 /prisma/db.sqlite
@@ -24,6 +27,9 @@ next-env.d.ts
 
 # production
 /build
+
+# claude worktrees
+.claude/worktrees
 
 # idea
 .idea
@@ -78,7 +84,6 @@ node_modules
 .turbo
 
 web/test-results/*
-.playwright-mcp/*
 .codex-artifacts/
 
 # Local DeepSec workspace and generated scan state
@@ -99,6 +104,7 @@ web/test-results/*
 
 # claude meta files
 .claude/tsc-cache
+.claude/worktrees
 
 # Refactoring planning files (local only)
 **/.refactor/
@@ -109,3 +115,6 @@ web/test-results/*
 
 # Local overrides for AGENTS.md
 **/AGENTS.override.md
+
+# Superset config
+.superset/
